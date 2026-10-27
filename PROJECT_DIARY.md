@@ -1,7 +1,7 @@
 # nps 项目日记
 
 > 日期：2026-10-27
-> 主题：协议细节、代理实现、Web API
+> 主题：协议细节、代理实现、Web API、nps 服务端深入解析
 > 方式：只读梳理源码，未修改任何代码
 > 版本：nps 0.26.10 / core 0.26.0
 
@@ -538,5 +538,456 @@ Web：
 - `web/routers/router.go`
 - `web/controllers/base.go`、`login.go`、`client.go`、`index.go`、`auth.go`
 - `docs/api.md`、`docs/webapi.md`
+
+---
+
+# 第二部分：nps 服务端深入解析
+
+> 日期：2026-10-27（第二轮）
+> 范围：`cmd/nps`、`server/`、`bridge/`、`web/controllers/`、`lib/file`、`lib/pmux`、`lib/rate`
+> 视角：只看 **服务端**——一条外部连接是如何被接住、分发、转成内网请求的
+
+## 7. 服务端总体骨架
+
+一句话：**nps 服务端是一个「按端口 / 域名 / 首包特征」分流的连接工厂**，本身不保存业务数据，所有内网请求最终都被拆成一条 mux 子流交给 npc。
+
+### 7.1 启动链路
+
+```
+main()
+ ├─ beego.LoadAppConfig("ini", runPath/conf/nps.conf)
+ ├─ common.InitPProfFromFile()
+ ├─ 日志初始化（log_level=7, log_path, CallDepth=3）
+ ├─ kardianos/service 配置（Name=Nps；Arguments 追加 "service"）
+ ├─ 子命令分流：reload / install / start / restart / stop / uninstall / update
+ └─ s.Run()
+      └─ nps.run()  ← recover 兜底，panic 打印 64KB 栈
+           └─ run()
+                ├─ routers.Init()                 // 注册 Beego 路由
+                ├─ 构造伪任务 &file.Tunnel{Mode:"webServer"}
+                ├─ 读 bridge_port（失败 os.Exit(0)）
+                ├─ connection.InitConnectionService()   // 端口复用初始化
+                ├─ crypt.InitTls()                // 生成自签证书
+                ├─ tool.InitAllowPort()           // 解析 allow_ports
+                ├─ tool.StartSystemInfo()         // 系统监控采集
+                ├─ disconnect_timeout（默认 60）
+                └─ go server.StartNewServer(...)
+```
+
+要点：
+
+| 观察 | 说明 |
+|---|---|
+| `run()` 末尾没有 `select{}` | 常驻靠外层 `nps.run()` 的 `select { case <-p.exit }`；`StartNewServer` 本身在 goroutine 中 |
+| `server.Bridge` 是包级全局变量 | Web 控制器、各 proxy 服务直接引用，没有依赖注入，进程内单例 |
+| `webServer` 是一个「假任务」 | 它不监听业务端口，只作为 `NewMode` 的入口，用来同时拉起控制台和 HTTP/HTTPS 反代 |
+| systemv 特殊处理 | `install` 会额外建 `/etc/rc.d/S90`、`K02` 软链；`start/stop` 走 `/etc/init.d/Nps` |
+| Windows 差异 | 日志路径转义、systemd/sysv 依赖跳过，其余流程一致 |
+
+### 7.2 StartNewServer：服务端对象图
+
+`StartNewServer(bridgePort, cnf *file.Tunnel, bridgeType, bridgeDisconnect)` 做五件事（[server.go#L88-L112](server/server.go#L88-L112)）：
+
+1. `Bridge = bridge.NewTunnel(bridgePort, bridgeType, ip_limit, RunList, bridgeDisconnect)`
+2. `go Bridge.StartTunnel()`，失败直接 `os.Exit(0)`
+3. `p2p_port` 存在时，启动 `p / p+1 / p+2` **三个** P2P 地址交换服务
+4. `go DealBridgeTask()` + `go dealClientFlow()`
+5. `NewMode(Bridge, cnf)` 构造主服务并 `Start()`，成功则 `RunList.Store(cnf.Id, svr)`
+
+进程内的三张全局表：
+
+| 结构 | 类型 | 内容 |
+|---|---|---|
+| `Bridge.Client` | `sync.Map` | clientId → `*bridge.Client`（signal + tunnel + file） |
+| `RunList` | `sync.Map` | taskId → `proxy.Service`；secret/p2p 任务存 `nil` 占位 |
+| `file.GetDb().JsonDb` | `sync.Map ×3` | Clients / Tasks / Hosts，配 JSON 落盘 |
+
+`dealClientFlow()` 每分钟调用一次 `dealClientData()`：把每个 client 的 Hosts 与 Tasks 流量**清零后重新求和**，避免重复累加（[server.go#L283-L313](server/server.go#L283-L313)）。
+
+### 7.3 NewMode 分发表
+
+| Mode | 构造 | 监听 / 行为 |
+|---|---|---|
+| `tcp` / `file` | `NewTunnelModeServer(ProcessTunnel)` | 裸 TCP 转发；`file` 走独立 mux 且强制关闭加密压缩 |
+| `httpProxy` | `NewTunnelModeServer(ProcessHttp)` | HTTP 正向代理 + CONNECT |
+| `socks5` | `NewSock5ModeServer` | RFC1928/1929，支持 CONNECT 与 UDP ASSOCIATE |
+| `udp` | `NewUdpModeServer` | 单端口 UDP，多会话按来源地址复用 |
+| `tcpTrans` | `NewTunnelModeServer(HandleTrans)` | 透明代理，Linux 取 `SO_ORIGINAL_DST` |
+| `webServer` | `InitFromCsv()` + 造 `httpHostServer` 任务 + `NewWebServer` | 控制台（Beego）+ 触发 80/443 反代 |
+| `httpHostServer` | `NewHttp(...)` | 读 `http_proxy_port` / `https_proxy_port` / 缓存 / `X-Forwarded-*` |
+
+`webServer` 分支的 `Port:0, Mode:"httpHostServer"` 任务没有真实监听端口，`AddTask` 中对 `httpHostServer` 特意跳过 `TestServerPort`。
+
+## 8. Bridge 生命周期
+
+### 8.1 监听与握手
+
+- `StartTunnel`：先 `go s.ping()`；`bridge_type=kcp` 走 `conn.NewKcpListenerAndProcess`，否则 `connection.GetBridgeListener(tunnelType)` + `conn.Accept`。
+- `cliProcess` 的 7 步握手与第 1.2 节一致；服务端读取流程：
+
+```
+GetShortContent(3)        → 不校验内容（应为 TST）
+GetShortLenContent()      → 与 version.GetVersion() 比对
+GetShortLenContent()      → 完整版本（记录到 vs）
+Write(md5(core version))  → 32 字节
+SetReadDeadlineBySecond(5)
+GetShortContent(32)       → vkey
+  ├─ 失败：写 "vkey"
+  └─ 成功：写 "sucs"，得到 clientId
+ReadFlag()                → 4 字节连接类型
+typeDeal(...)
+SetAlive(tunnelType)
+```
+
+### 8.2 typeDeal：七种连接类型
+
+| 标记 | 关键逻辑 |
+|---|---|
+| `main` | pub client 直接关闭；TCP 设 keepalive 5s；`LoadOrStore` 若已存在旧 signal 则先 `WriteClose()` 再替换；`go GetHealthFromClient(id, c)` |
+| `chan` | 在连接上 `nps_mux.NewMux(c.Conn, tunnelType, disconnectTime)`，复用已有 Client 结构 |
+| `conf` | `!isPub && !ConfigConnAllow` 直接关；写 `isPub`（bool）后 `go getConfig` |
+| `rgst` | `go register`：读 `int32` 小时数，写 `Bridge.Register[ip] = now + hour` |
+| `sert` | 读 32 字节 md5(password)，投递 `SecretChan`，由 `DealBridgeTask` 匹配任务后中继 |
+| `file` | 另建一条独立 mux，仅用于文件服务 |
+| `p2pm` | 读 32 字节 md5(password) 找任务；向 provider 的 signal 写 `udpc` + 服务端 UDP 地址 + 密钥；向请求者只写地址 |
+
+### 8.3 在线判定与清理
+
+`ping()` 每 5 秒扫描 `Bridge.Client`（[bridge.go#L361-L388](bridge/bridge.go#L361-L388)）：
+
+- `tunnel == nil || signal == nil` → `retryTime++`，累计 ≥3 判定掉线
+- `tunnel.IsClose` → 立即判定掉线
+- 掉线统一走 `DelClient(id)`：
+
+```
+signal.Close() → Client.Delete(id)
+             → 非 public_vkey 客户端：CloseClient <- id
+                 → DealBridgeTask: DelTunnelAndHostByClientId(id, true)
+                                    （只删 NoStore 的 host/task）
+                 → 若 Client.NoStore，再 DelClient
+```
+
+这意味着：**配置文件模式下下发的临时任务，在客户端断开时会被自动回收**；Web 面板手工创建的任务则保留。
+
+### 8.4 SendLinkInfo：数据面的唯一出口
+
+`SendLinkInfo(clientId, link, t)`（[bridge.go#L314-L359](bridge/bridge.go#L314-L359)）是所有代理模式共用的「借子流」函数：
+
+```
+link.LocalProxy ──true──> net.Dial("tcp", link.Host)   // 服务端本机直接拨号
+                └─false─> Bridge.Client[clientId]
+                            ├─ ip_limit 校验 Bridge.Register
+                            ├─ file 模式取 Client.file，且 Crypt/Compress=false
+                            ├─ tunnel.NewConn()            // 一条 mux 子流
+                            └─ conn.NewConn(target).SendInfo(link, "")
+```
+
+注意 `file` 模式虽然也返回子流，但**不发 Link**——npc 侧直接把它当 HTTP 服务器连接使用，所以服务端必须在发 Link 前把 Crypt/Compress 置 false 并提前 return。
+
+## 9. 配置下发 getConfig
+
+`getConfig(c, isPub, client)` 是 `conf` 连接的循环处理体（[bridge.go#L391](bridge/bridge.go#L391)），支持四种标记：
+
+| 标记 | 方向 | 行为 |
+|---|---|---|
+| `stus` | npc 查询任务状态 | 读 32 字节 md5(vkey) → 反查 clientId → 拼 Hosts/Tasks 的 `Remark + "*#*"`，回 `int32` 长度 + 内容 |
+| `conf` | npc 上送完整配置 | `GetConfigInfo` → `NewClient`（校验 vkey 查重）→ `WriteAddOk` + 下发 `VerifyKey`，并在 Bridge 中占位 `NewClient(nil,nil,nil,"")` |
+| `host` | npc 上送域名 | `Location` 为空补 `/`；`HasHost` / `IsHostExist` 判重 |
+| `task` | npc 上送隧道 | `GetPorts` 拆分多端口；多端口时 `Remark_Port` 且 `TargetStr` 追加 `:port`；`NoStore=true`；`HasTunnel` 判重；`TestServerPort` 后 `OpenTask <- tl` |
+
+任何一步失败且 `client != nil` 时调用 `DelClient`，最后 `c.Close()`。配置面因此是「客户端驱动、服务端校验」的模型：**配置的源头在 npc 的 ini 文件，nps 只负责落库和起监听**。
+
+## 10. 任务生命周期
+
+### 10.1 AddTask / StartTask / StopServer / DelTask
+
+| 函数 | 行为 | 隐患 |
+|---|---|---|
+| `AddTask` | `secret`/`p2p` 仅占位；其余 `TestServerPort` → `flow_store_interval` 起落盘 ticker → `NewMode` → `RunList.Store` → `go svr.Start()`，失败 `RunList.Delete` | 每次调用都新建一个 `flowSession` ticker；Start 失败不回写 `Status` |
+| `StartTask` | `AddTask(t)` 后强制 `t.Status=true` + `UpdateTask` | **完全忽略 AddTask 的 error**，端口占用时界面仍显示运行中 |
+| `StopServer` | `RunList.Load` → `svr.Close()` → `t.Status=false` + `UpdateTask` → `RunList.Delete` | 任务不在 RunList 时报 "task is not running"，但 Web 层仍会显示失败 |
+| `DelTask` | 若在 RunList 则先 `StopServer`，再 `DelTask` 落库 | 删除运行中任务依赖 StopServer 成功 |
+
+`secret` / `p2p` 没有监听端口，所以 AddTask 只占位，实际入口分别在 `SecretChan` 和 P2P UDP 交换服务。
+
+### 10.2 端口校验规则（tool.TestServerPort）
+
+```
+p2p / secret            → true（无需端口）
+p > 65535 || p < 0      → false
+allow_ports 非空且不含 p → false
+udp  → common.TestUdpPort
+其他 → common.TestTcpPort
+```
+
+`httpHostServer` 在 AddTask 中被显式豁免，因为它使用配置里的 80/443，而不是任务自身端口。
+
+## 11. 各代理模式内部实现
+
+### 11.1 TCP / File（TunnelModeServer）
+
+`Start`（[server/proxy/tcp.go](server/proxy/tcp.go)）：
+
+```
+conn.NewTcpListenerAndProcess(ServerIp:Port, func(c *conn.Conn){
+    CheckFlowAndConnNum(client)     // 流量上限 + 连接数上限
+    s.process(c, s)                 // ProcessTunnel / ProcessHttp / HandleTrans
+    task.Client.AddConn()           // 连接数 +1
+})
+```
+
+`ProcessTunnel` 极简：`GetRandomTarget()` 取目标 → `DealClient(..., CONN_TCP, nil, task.Flow, task.Target.LocalProxy)`。真正的双向复制在 `BaseServer.DealClient`（[server/proxy/base.go](server/proxy/base.go)）：
+
+```
+NewLink(tp, addr, Crypt, Compress, RemoteAddr, localProxy)
+  → SendLinkInfo
+  → 回调 f()（例如 CONNECT 先回 200）
+  → conn.CopyWaitGroup(target, c.Conn, link.Crypt, link.Compress,
+                        client.Rate, flow, true, rb)
+```
+
+`flow` 在复制过程中按方向累加 Inlet/Export，这也是面板流量的唯一来源。
+
+### 11.2 HTTP 正向代理（ProcessHttp）
+
+```
+c.GetHost()   // 从请求行/ Host 头解析出 host:port
+若 method == CONNECT：
+    回 "HTTP/1.1 200 Connection established\r\n\r\n"
+    rb = nil（之后是裸字节流）
+auth(U, P)    // 401 时写 UnauthorizedBytes 并关闭
+DealClient(..., CONN_TCP, nil, task.Flow, LocalProxy)
+```
+
+`GetHost` 里对 `Opaque == "443"` 补 `:443`，否则无端口补 `:80`，见 [lib/conn/conn.go](lib/conn/conn.go)。
+
+### 11.3 SOCKS5
+
+支持三种命令，但实现完整度不同：
+
+| 命令 | 实现 |
+|---|---|
+| CONNECT (1) | 完整：解析 IPv4/IPv6/域名 + 大端端口 → `doConnect` → `DealClient`，成功后 `sendReply(succeeded)` |
+| BIND (2) | **空实现**：只识别命令，不建监听也不回 reply，连接会悬挂 |
+| UDP ASSOCIATE (3) | 完整：`net.ListenUDP(serverIp:0)` → 回绑定地址 → `NewLink("udp5","",...)` → 本地 UDP ↔ 目标双向转发 |
+
+认证：`(Cnf.U!="" && Cnf.P!="")` 或 `MultiAccount.AccountMap` 非空时回 `0x02`，否则回 `0x00` 免认证；`Auth` 按 RFC1929 校验，成功 `{1,0}` 失败 `{1,1}`。
+
+UDP ASSOCIATE 的两个方向：
+
+- 本地 → npc：`reply.ReadFrom` 收到的是**带 SOCKS5 UDP 头**的完整报文，nps 原样 `target.Write(b[:n])` 交给 npc 解析
+- npc → 本地：读 `int32 LE` 长度前缀 + 数据，再 `reply.WriteTo(b[:l], clientAddr)` 发回客户端
+- `clientAddr` 取第一条报文的来源地址；`l <= 0 || l >= PoolSizeUdp` 直接退出
+- 主循环靠 `c.Read` 保活，TCP 控制连接断开即回收
+
+### 11.4 UDP（UdpModeServer）
+
+单端口多会话，核心是 `addrMap sync.Map`（来源地址 → 目标连接）：
+
+```
+ReadFromUDP → go process(addr, data)
+  ├─ addrMap 命中 → 直接 Write
+  └─ 未命中 → CheckFlowAndConnNum → NewLink(CONN_UDP) → SendLinkInfo
+              → conn.GetConn(...) → addrMap.Store
+              → 回包循环：SetReadDeadline(now+10min) → Read → WriteTo(addr)
+```
+
+每个来源地址独占一条 mux 子流，10 分钟无回包即自然退出，读错误时 `addrMap.Delete` + `defer target.Close()` 完成回收。
+
+注意这里是先 `addrMap.Load` 未命中、再 `SendLinkInfo`（一次网络往返）、最后才 `Store`。同一来源的两个首包并发到达时可能都未命中，从而建立**两条**子流、后写入的覆盖先写入的，前者失去索引但仍在后台读包。
+
+### 11.5 Web 控制台（WebServer）
+
+```
+web_port == 0 → 永久阻塞（只做反代，不开控制台）
+SessionOn = true
+SetStaticPath(runPath/web/static)
+SetViewsPath(runPath/web/views)
+connection.GetWebManagerListener()   // 可能与 bridge 共用端口（pmux）
+beego.InitBeforeHTTPRun()
+web_open_ssl == "true" ? http.ServeTLS : http.Serve
+```
+
+### 11.6 HTTP/HTTPS 反向代理（httpHostServer）
+
+`NewHttp` 同时管理 80 与 443 两个监听：
+
+- 80：`handleTunneling` 用 `http.Hijacker` 取裸连接 → `handleHttp`
+- 443：`HttpsServer`，见 11.7
+
+`handleHttp` 的 `reset:` 标签是整段最复杂的逻辑：
+
+```
+GetInfoByHost(r.Host, r)   // 按域名 + Location 最长前缀匹配
+CheckFlowAndConnNum / auth
+GetRandomTarget
+NewLink("http", targetAddr, ...) → SendLinkInfo(host.Client.Id, lk, nil)
+响应 goroutine：
+    useCache && URL.Path 含 "." → DumpResponse → 写回 + cache.Add
+    否则 NewLenConn(c) + resp.Write
+请求循环：
+    命中缓存 → 直接写回 → goto readReq
+    ChangeHostAndHeader → r.Write(NewLenConn(client))
+readReq:
+    读下一请求 → 设 Scheme → resetReqMethod → Host 变化则 isReset + goto reset
+```
+
+两个「历史包袱」：
+
+- `resetReqMethod` 把 `"ET"` 改回 `"GET"`、`"OST"` 改回 `"POST"`，源码注释写着 “What happened，Why one character less???”
+- `NewServer` 用空的 `TLSNextProto` 关闭 HTTP/2，避免 h2 的流语义与「一请求一子流」模型冲突
+
+### 11.7 HTTPS 与 SNI
+
+`https_just_proxy=true` 时是**纯 SNI 透传**：只解析 ClientHello 拿 serverName，然后直接 `DealClient`，证书由内网服务自己提供。
+
+关闭时是**按 SNI 动态加载证书本地终止**：
+
+```
+先建 default listener（https_default_cert_file/key_file）
+Accept → GetServerNameFromClientHello
+  ├─ SNI 为空 → default
+  ├─ httpsListenerMap 命中 → 复用
+  └─ GetInfoByHost(serverName) 取 CertFilePath/KeyFilePath
+       不存在 → default
+       存在 → NewHttpsListener + NewHttps + Store
+最后把连接放进 acceptConn.Rb 投递
+```
+
+`GetServerNameFromClientHello` 固定读 4096 字节，`n < 42` 直接返回空；分片 ClientHello 会退化到 default 证书。
+
+### 11.8 tcpTrans（透明代理）
+
+仅 Linux 有效：`SyscallConn` + `GetsockoptIPv6Mreq(IPPROTO_IP, SO_ORIGINAL_DST=80)` 取原始目的地址，再 `DealClient`。Windows 版本 `HandleTrans` 直接 `return nil`，等于**静默不转发**。
+
+### 11.9 Secret
+
+客户端侧监听本地 TCP，收到用户连接后新开一条 `sert` 连接并写 `md5(password)`；服务端 `typeDeal` 把连接投给 `SecretChan`，`DealBridgeTask` 用 `GetTaskByMd5Password` 找到任务，直接 `DealClient(CONN_TCP)`。整条链路不需要 mux，因此 Secret 不依赖 `chan` 连接。
+
+### 11.10 P2P
+
+- 服务端起 `p2p_port / +1 / +2` 三个 UDP 交换器，报文按 `*#*` 拆分
+- `arr[1] == "p2pv"`（visitor）存地址，最多等 20 秒（每秒轮询）等 provider
+- provider 到达后双方互换地址并 `delete(s.p2p, key)`
+- 真正的打洞由客户端完成（`sendP2PTestMsg`，见第 1 章）
+- 打洞失败时客户端回退为 Secret
+
+## 12. pmux 端口复用
+
+当 `web_port` / `http_proxy_port` / `https_proxy_port` 与 `bridge_port` 冲突时，`connection.InitConnectionService()` 会启用端口复用，所有流量先经过 `lib/pmux`（[lib/pmux/pmux.go](lib/pmux/pmux.go)）。
+
+分流规则（读首包 3 字节 → `BytesToNum` 后与常量比对）：
+
+| 首包 | 判定 |
+|---|---|
+| `GET ` / `POST` / `HEAD` / `PUT` / `DELETE` / `CONNECT` / `OPTIONS` / `TRACE` | HTTP；再读到 `Host:` 行，`Host` 的 IP == `managerHost` 时进 managerConn，否则 httpConn |
+| `TST` | clientConn（bridge 握手） |
+| 其他 | httpsConn（并置 `readMore=true`，后续读到字节继续吐给 TLS） |
+
+投递时用 10 秒 timer，超时丢弃；`Close()` 幂等关闭四个 channel 与 listener。`PortConn.Read` 先吐 `Peek` 出来的剩余字节，再按 `readMore` 决定是否继续读底层——这是「偷看首包但不丢字节」的关键。
+
+## 13. 持久层：sync.Map + JSON
+
+- 单例 `file.GetDb()`，启动时加载 `conf/clients.json`、`conf/tasks.json`、`conf/hosts.json`
+- 记录以 `"\n*#*"` 分隔追加，写 `*.tmp` → `Sync` → `Close` → `os.Rename` 原子替换
+- 三张表各有独立 `sync.Mutex`，避免互相阻塞
+- `NoStore=true` 的记录（配置文件下发的临时 client/host/task）**不落盘**
+- 加载 Host/Task 时必须先成功 `GetClient(post.Client.Id)`，否则跳过——保证引用完整性
+- `GetClientId` / `GetTaskId` / `GetHostId` 用 `atomic.AddInt32` 生成自增 Id
+
+注意：`loadSyncMapFromFile` 读文件失败会 **直接 panic**。仓库自带三个 0 字节 JSON 文件所以首次启动正常；如果部署时漏拷 `conf/*.json`，进程会直接崩在启动阶段。
+
+## 14. Web 控制台的服务端逻辑
+
+### 14.1 两套鉴权
+
+| 方式 | 触发条件 | 结果 |
+|---|---|---|
+| Session | 登录成功 | `auth=true`；admin 另有 `isAdmin=true` |
+| 签名直通 | `auth_key` + `timestamp` 且 `|now-ts| <= 20` 且 `md5(configKey+ts)==签名` | 直接 `SetSession("isAdmin", true)`，供 `docs/api.md` 的脚本调用 |
+
+`Prepare()` 在未登录时 `Redirect(web_base_url+"/login/index", 302)`；非 admin 会把 session 里的 `clientId` 注入参数并调用 `CheckUserAuth()`：
+
+- `client` 控制器：禁止 `add`，且 `id != 0` 时必须等于 session 的 clientId
+- `index` 控制器：`id != 0` 时按 action 名是否含 `h` 判断是 Host 还是 Tunnel，再校验归属
+
+### 14.2 登录与注册
+
+`doLogin`（[web/controllers/login.go](web/controllers/login.go)）：
+
+1. `clearIprecord()`：1% 概率清理 60 秒前的失败记录
+2. 同 IP 60 秒内失败 ≥10 次直接拒绝
+3. admin：匹配 `web_username / web_password` → `isAdmin=true`，删除 clientId/username session，并 `Bridge.Register.Store(ip, now+2h)`（供 `ip_limit` 使用）
+4. 普通用户（`allow_user_login=true`）：遍历 Clients，跳过 `!Status` / `NoDisplay`；未设置网页账号密码的客户端用 `username=="user" && password==VerifyKey` 登录，否则匹配 `WebUserName/WebPassword`
+5. 成功 `SetSession("auth", true)`；失败按 IP 累加失败次数
+
+`Register` 仅在 `allow_user_register=true` 时开放，用户名不能为空、不能等于 admin，`NewClient` 失败返回错误。
+
+## 15. 本轮新发现的缺陷与风险
+
+> 均为只读分析所得，未修改代码。
+
+| # | 位置 | 问题 | 影响 |
+|---|---|---|---|
+| 1 | [server.go#L54-L85](server/server.go#L54-L85) | `DealBridgeTask` 有**两个** `<-Bridge.OpenTask` case，第二个 `StartTask(tunnel.Id)` 永远不可达 | 已用最小程序验证 Go 允许重复 case 且编译通过；「启动任务」语义实际由 `AddTask` 承担，`Status` 不会回写 |
+| 2 | [server.go#L196-L198](server/server.go#L196-L198) | `AddTask` 内每次 `go flowSession(...)` | `flow_store_interval>0` 时每个任务一个 ticker，任务越多落盘越频繁、goroutine 线性增长 |
+| 3 | [server.go#L218-L226](server/server.go#L218-L226) | `StartTask` 忽略 `AddTask` 错误并强制 `Status=true` | 端口被占用时面板显示「运行中」，实际无监听 |
+| 4 | [server/proxy/p2p.go](server/proxy/p2p.go) | `s.p2p` 是普通 `map`，`handleP2P` 在 goroutine 中并发读写且无锁 | 并发访问可能触发 `concurrent map read and map write` panic |
+| 5 | [server/proxy/socks5.go](server/proxy/socks5.go) | `handleBind` 空实现 | SOCKS5 BIND 请求的连接会一直悬挂 |
+| 6 | [server/proxy/transport_windows.go](server/proxy/transport_windows.go) | `HandleTrans` 直接 `return nil` | Windows 下 `tcpTrans` 无任何转发，且无日志 |
+| 7 | [server/test/test.go](server/test/test.go) | 使用旧配置键 `httpProxyPort` / `pemPath` / `keyPath`，且未被 `cmd/nps` 调用 | 启动阶段不做端口冲突自检 |
+| 8 | [web/controllers/client.go](web/controllers/client.go) | `ChangeStatus` 成功分支 `AjaxOk` 后没有 return，继续执行 `AjaxErr` | 依赖 `AjaxOk` 内部 `StopRun` panic 才侥幸正确，代码意图混乱 |
+| 9 | [lib/rate/rate.go](lib/rate/rate.go) | `Get` 中 100ms ticker 没有 `stop` 分支 | 高并发等待会创建大量短命 ticker，`Rate.Stop()` 无法回收 |
+| 10 | [lib/file/file.go](lib/file/file.go) | `loadSyncMapFromFile` 读失败直接 `panic` | 缺少 `conf/*.json` 时启动即崩溃 |
+| 11 | [lib/common/util.go](lib/common/util.go) | `IsPort` 上界写成 `65536` | 非法端口 65536 可穿过校验 |
+| 12 | [bridge/bridge.go](bridge/bridge.go) | `cliProcess` 读 3 字节后不校验是否 `TST` | 任意 TCP 连接都会被当作握手处理，浪费 fd / 增加探测面 |
+| 13 | [lib/crypt/tls.go](lib/crypt/tls.go) | `NewTlsServerConn` 中 `var err error; if err != nil` 是死代码 | TLS 包装失败不会被感知 |
+| 14 | [server/server.go#L352-L436](server/server.go#L352-L436) | `GetDashboardData` 直接 `dealClientData()`，采集 IO 时 `Sleep(500ms)`；且 `dealClientData` 直接给 `Flow.InletFlow/ExportFlow` 赋值，未持有 `Flow.RWMutex` | 打开首页至少阻塞 0.5 秒；与复制协程里的 `Flow.Add`（加锁累加）构成数据竞争 |
+| 15 | [lib/pmux/pmux.go](lib/pmux/pmux.go) | 非 HTTP / 非 `TST` 首包一律当 HTTPS | 未知协议占用 `httpsConn`，10 秒后才释放 |
+| 16 | [server/proxy/https.go](server/proxy/https.go) | 固定读 4096 字节解析 ClientHello，`n<42` 返回空 | 分片 ClientHello 会回落 default 证书，SNI 匹配失败 |
+| 17 | [server/proxy/udp.go](server/proxy/udp.go) | `Load` → `SendLinkInfo` → `Store` 之间存在时间窗 | 同一来源并发首包可能建立多条子流，后写覆盖先写，前一条失去索引仍占用连接 |
+
+上一轮已记录的 6 条安全风险与 8 条稳定性问题仍有效，本节只列本轮**新增**项。
+
+## 16. 服务端配置项速查（conf/nps.conf）
+
+| 配置 | 作用 | 消费位置 |
+|---|---|---|
+| `bridge_type` / `bridge_port` | 控制面协议与端口 | `StartNewServer` / `StartTunnel` |
+| `public_vkey` | 公共客户端 vkey，空则禁用 | `InitFromCsv`、登录计数、`DelClient` |
+| `ip_limit` | 是否启用 `Bridge.Register` 白名单 | `bridge.NewTunnel` → `SendLinkInfo` |
+| `disconnect_timeout` | mux 断线判定秒数 | `nps_mux.NewMux` |
+| `p2p_port` / `p2p_ip` | P2P 交换端口与对外 IP | `StartNewServer` / 面板 |
+| `http_proxy_port` / `https_proxy_port` | 反代监听 | `NewMode("httpHostServer")` |
+| `https_just_proxy` | 纯 SNI 透传开关 | `HttpsServer.Start` |
+| `http_cache` / `http_cache_length` | 静态资源缓存 | `NewHttp` |
+| `http_add_origin_header` | 追加 `X-Forwarded-*` | `ChangeHostAndHeader` |
+| `allow_ports` | 端口白名单 | `tool.InitAllowPort` / `TestServerPort` |
+| `flow_store_interval` | 流量落盘周期（分钟） | `AddTask` → `flowSession` |
+| `web_port` / `web_open_ssl` / `web_base_url` | 控制台 | `WebServer.Start` / 路由 |
+| `auth_key` / `auth_crypt_key` | API 签名 / AES 密钥 | `base.Prepare` / `auth.GetAuthKey` |
+| `allow_*` 系列 | 用户权限开关 | `base.Prepare` 注入模板 + 控制器校验 |
+
+## 17. 一次 TCP 请求的完整时序
+
+```
+用户 1.2.3.4:随机端口
+  │  connect  nps:task.Port
+  ▼
+TunnelModeServer.Start (accept)
+  ├─ CheckFlowAndConnNum：FlowLimit / MaxConn
+  ├─ ProcessTunnel
+  │    └─ GetRandomTarget：TargetArr 轮询（0 个 → 报错，1 个 → 直取）
+  └─ DealClient
+       ├─ NewLink("tcp", "10.0.0.5:8080", Crypt, Compress, "1.2.3.4:x", LocalProxy)
+       ├─ SendLinkInfo
+       │    ├─ LocalProxy? → 本机 net.Dial
+       │    └─ 否 → Client.tunnel.NewConn() → SendInfo(Link)
+       │            └─ npc 读 Link → 本地 Dial target
+       └─ CopyWaitGroup(target, c.Conn, ...)
+            └─ 双向复制，同时累加 task.Flow / host.Flow / client.Rate 限速
+```
+
+至此，服务端的职责闭环：**握手鉴权 → 建 mux → 建监听 → 收连接 → 借子流 → 下发 Link → 双向复制 → 流量记账**。
 
 ---
