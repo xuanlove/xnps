@@ -173,9 +173,13 @@ class NpsApiClient
         $params = $this->signParams($params);
 
         $attempt = function () use ($method, $path, $params, $json) {
-            // TLS 校验按服务器配置（自签证书场景 false，CA 签发 true）
+            // TLS 校验按服务器配置（自签证书场景 false，CA 签发 true）；
+            // 禁用重定向：nps 的 302（签名失败跳登录页）必须被识别而非跟随
             $req = Http::timeout(config('nps.http_timeout'))
-                ->withOptions(['verify' => (bool) ($this->server->tls_verify ?? true)]);
+                ->withOptions([
+                    'verify' => (bool) ($this->server->tls_verify ?? true),
+                    'allow_redirects' => false,
+                ]);
 
             if ($json !== null) {
                 $req = $req->asJson();

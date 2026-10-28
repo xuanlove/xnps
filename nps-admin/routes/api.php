@@ -3,6 +3,8 @@
 use App\Http\Controllers\Admin\AdminController;
 use App\Http\Controllers\Admin\CertificateController;
 use App\Http\Controllers\Admin\MonitorController;
+use App\Http\Controllers\Admin\UpgradeController;
+use App\Http\Controllers\ArtifactDownloadController;
 use App\Http\Controllers\ClientController;
 use App\Http\Controllers\HostController;
 use App\Http\Controllers\Portal\AuthController;
@@ -57,9 +59,20 @@ Route::prefix('admin')
         Route::get('/monitor/{server}/metrics', [MonitorController::class, 'metrics']);
         Route::get('/monitor/alerts', [MonitorController::class, 'alerts']);
         Route::post('/monitor/check', [MonitorController::class, 'check']);
+
+        // 版本滚动升级（DESIGN.md §9，阶段 4）
+        Route::get('/upgrades/artifacts', [UpgradeController::class, 'artifacts']);
+        Route::post('/upgrades/artifacts', [UpgradeController::class, 'artifactStore']);
+        Route::post('/upgrades/start/{artifact}', [UpgradeController::class, 'start']);
+        Route::get('/upgrades/runs', [UpgradeController::class, 'runs']);
+        Route::get('/upgrades/runs/{run}', [UpgradeController::class, 'show']);
     });
 
 // ---- nps 集中管理 API（阶段 1：管理面，生产应叠加 admin 中间件）----
+
+// 制品下载端点（nps 出方向拉取，token 鉴权——见 ArtifactDownloadController）
+Route::get('/artifacts/{artifact}/download/{token}', [ArtifactDownloadController::class, 'download'])
+    ->where('token', '[A-Za-z0-9]+');
 
 Route::prefix('nps')->group(function () {
     // 服务器纳管
