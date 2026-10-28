@@ -14,7 +14,7 @@ use Illuminate\Support\Facades\Log;
  *  - 签名注入：auth_key = md5(nps.conf auth_key + timestamp)，±20s 窗口
  *  - 时钟校准：/auth/gettime（免鉴权）按 baseUrl 缓存偏移
  *  - 三种响应格式统一（NpsResponse）
- *  - 超时 + 指数退避重试（连接错误 / 5xx）
+ *  - 超时 + 指数退避重试（仅 GET / 只读 ext 端点；写操作不重试防重复创建）
  *  - 审计：写操作必记 nps_api_logs，读操作按配置
  */
 class NpsApiClient
@@ -181,8 +181,21 @@ class NpsApiClient
     // ------------------------------------------------------------------
 
     /**
+     * 幂等的只读 POST 端点（可安全重试）；写操作一律不重试，避免重复创建资源。
+     */
+    private const RETRYABLE_POST_PATHS = [
+        '/ext/version',
+        '/ext/changes',
+        '/ext/online',
+        '/ext/flow',
+        '/ext/list',
+        '/ext/system',
+    ];
+
+    /**
      * @param  array  $params  query/form 参数（签名自动注入）
      * @param  array|null  $json  JSON 请求体（ext 端点用；签名仍走 query）
+     * @param  int|null  $retries  覆盖重试次数（null=按方法/路径策略）
      */
     public function call(string $method, string $path, array $params = [], ?array $json = null, ?int $timeoutSeconds = null, ?int $retries = null): NpsResponse
     {
@@ -190,7 +203,13 @@ class NpsApiClient
         $start = microtime(true);
         $params = $this->signParams($params);
         $timeout = $timeoutSeconds ?? (int) config('nps.http_timeout');
-        $attempts = $retries !== null ? max(1, $retries + 1) : max(1, (int) config('nps.http_retries') + 1);
+        if ($retries !== null) {
+            $attempts = max(1, $retries + 1);
+        } else {
+            $attempts = $this->isRetryable($method, $path)
+                ? max(1, (int) config('nps.http_retries') + 1)
+                : 1;
+        }
 
         $attempt = function () use ($method, $path, $params, $json, $timeout) {
             // TLS 校验按服务器配置（自签证书场景 false，CA 签发 true）；
@@ -242,7 +261,7 @@ class NpsApiClient
                     // 指数退避：1s, 2s...
                     return $attempts * 1000;
                 },
-                fn (\Throwable $e) => true, // 连接错误 / 5xx / 超时均重试
+                fn (\Throwable $e) => true, // 仅连接错误/超时（写操作 attempts=1，不会进入重试）
             );
         } catch (\Throwable $e) {
             $result = new NpsResponse(ok: false, msg: 'request failed: '.$e->getMessage());
@@ -257,6 +276,19 @@ class NpsApiClient
     // ------------------------------------------------------------------
     // 内部
     // ------------------------------------------------------------------
+
+    /**
+     * 仅 GET 与只读 ext 端点允许重试；POST 写操作（client/tunnel/host/
+     * config/cert/restart/upgrade）在连接超时后重试可能重复创建资源。
+     */
+    private function isRetryable(string $method, string $path): bool
+    {
+        if ($method === 'GET') {
+            return true;
+        }
+
+        return in_array($path, self::RETRYABLE_POST_PATHS, true);
+    }
 
     /**
      * 签名注入（源码核实：md5(auth_key + timestamp)，±20s 窗口）

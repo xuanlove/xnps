@@ -1,5 +1,6 @@
 <?php
 
+use App\Jobs\CollectMetricsJob;
 use App\Jobs\ReconcileServerJob;
 use App\Jobs\SyncFlowJob;
 use App\Jobs\SyncOnlineJob;
@@ -9,16 +10,35 @@ use App\Models\NpsServer;
 use Illuminate\Support\Facades\Schedule;
 
 // ---- nps 集中管理调度（DESIGN.md §6 / §12.2）----
+//
+// 秒级任务由 schedule:work 进程按节拍派发一次性 Job（不再自循环，
+// 避免 seeds 每 10 分钟叠加出新的永久循环）。Job 实现 ShouldBeUnique，
+// 队列积压时重复派发会被自动丢弃。生产推荐常驻 `php artisan schedule:work`；
+// cron `schedule:run` 也会在分钟内重复到期事件，但需自行防进程重叠。
 
-// 秒级精度任务由 Job 自循环承担（SyncVersionJob 10s / SyncOnlineJob 30s /
-// SyncFlowJob 5min）；此处每 10 分钟播一颗种子防循环断裂（幂等，重复执行无害）
 Schedule::call(function () {
     NpsServer::where('status', 'active')->each(function (NpsServer $server) {
         SyncVersionJob::dispatch($server->id)->onQueue('nps-sync');
+    });
+})->everyTenSeconds()->name('nps-sync-version')->withoutOverlapping(1);
+
+Schedule::call(function () {
+    NpsServer::where('status', 'active')->each(function (NpsServer $server) {
         SyncOnlineJob::dispatch($server->id)->onQueue('nps-sync');
+    });
+})->everyThirtySeconds()->name('nps-sync-online')->withoutOverlapping(1);
+
+Schedule::call(function () {
+    NpsServer::where('status', 'active')->each(function (NpsServer $server) {
         SyncFlowJob::dispatch($server->id)->onQueue('nps-sync');
     });
-})->everyTenMinutes()->name('nps-sync-seeds');
+})->everyFiveMinutes()->name('nps-sync-flow')->withoutOverlapping(5);
+
+Schedule::call(function () {
+    NpsServer::where('status', 'active')->each(function (NpsServer $server) {
+        CollectMetricsJob::dispatch($server->id)->onQueue('nps-sync');
+    });
+})->everyThirtySeconds()->name('nps-metrics')->withoutOverlapping(1);
 
 // L3 滚动对账：每 6h 全量兜底
 Schedule::call(function () {
@@ -45,13 +65,6 @@ Schedule::call(function () {
 })->monthlyOn(1, '00:05')->name('monthly-settlement');
 
 // ---- 证书与监控（DESIGN.md §7 / 阶段 3）----
-
-// 监控采集种子（CollectMetricsJob 自循环 30s，此处防断裂）
-Schedule::call(function () {
-    NpsServer::where('status', 'active')->each(function (NpsServer $server) {
-        \App\Jobs\CollectMetricsJob::dispatch($server->id)->onQueue('nps-sync');
-    });
-})->everyTenMinutes()->name('metrics-seeds');
 
 // 告警检查：阈值 / 不可达 / 证书到期 / 同步延迟 / 隧道异常
 Schedule::call(function () {
