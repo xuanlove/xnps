@@ -93,6 +93,8 @@ cd nps-admin && npm install && npm run build
 
 控制台功能：仪表盘、服务器（探活/同步/配置/证书）、客户端、隧道、域名解析、审批、计费与支付（套餐/钱包/账单/支付流水）、证书（上传/certd/内置 ACME/部署/HTTPS/轮换/对账）、版本升级（制品/灰度/回滚）、监控告警与指标曲线。
 
+完整生产部署（PHP-FPM/Nginx、Supervisor 队列、调度、权限、支付与 ACME 配置、备份与故障排查）见 [ADMIN_DEPLOYMENT.md](ADMIN_DEPLOYMENT.md)。
+
 ### 支付渠道（支付宝 / 微信支付 v3）
 
 在 `nps-admin/.env` 配置（详见 `config/payments.php`）：
