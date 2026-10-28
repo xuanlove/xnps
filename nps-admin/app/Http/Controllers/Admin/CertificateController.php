@@ -53,6 +53,31 @@ class CertificateController extends Controller
     }
 
     /**
+     * ACME 签发（certd 或内置 ACME）并入库
+     */
+    public function issue(Request $request, CertificateService $service): JsonResponse
+    {
+        $validated = $request->validate([
+            'domains' => 'required|array|min:1|max:10',
+            'domains.*' => 'string|max:253',
+            'mode' => 'required|in:certd,builtin',
+            'server_id' => 'nullable|integer|exists:nps_servers,id',
+        ]);
+
+        $server = ! empty($validated['server_id'])
+            ? NpsServer::find($validated['server_id'])
+            : null;
+
+        try {
+            $cert = $service->issueAcme($validated['domains'], $server, $validated['mode']);
+        } catch (\Throwable $e) {
+            return response()->json(['error' => $e->getMessage()], 502);
+        }
+
+        return response()->json(['data' => $cert], 201);
+    }
+
+    /**
      * 部署证书到一台服务器（不重启；滚动重启由编排器逐台控制）
      */
     public function deploy(Request $request, Certificate $certificate, NpsServer $server, CertificateService $service): JsonResponse
@@ -99,6 +124,14 @@ class CertificateController extends Controller
         }
 
         return response()->json(['data' => $result]);
+    }
+
+    /**
+     * 全平台指纹对账
+     */
+    public function verifyAll(CertificateService $service): JsonResponse
+    {
+        return response()->json(['data' => $service->reconcileAll()]);
     }
 
     /**

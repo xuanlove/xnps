@@ -262,16 +262,16 @@ class BillingService
     /**
      * 充值（管理员操作）
      */
-    public function recharge(User $user, int $amountCents, string $remark = ''): Wallet
+    public function recharge(User $user, int $amountCents, string $remark = '', ?string $refType = null): Wallet
     {
         if ($amountCents <= 0) {
             throw new \InvalidArgumentException('amount must be positive');
         }
 
-        return DB::transaction(function () use ($user, $amountCents, $remark) {
+        return DB::transaction(function () use ($user, $amountCents, $remark, $refType) {
             $wallet = Wallet::firstOrCreate(['user_id' => $user->id]);
             $wallet->increment('balance_cents', $amountCents);
-            $this->recordTransaction($wallet, 'recharge', $amountCents, null, $remark);
+            $this->recordTransaction($wallet, 'recharge', $amountCents, $refType, $remark);
 
             return $wallet->fresh();
         });

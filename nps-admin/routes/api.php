@@ -1,17 +1,25 @@
 <?php
 
 use App\Http\Controllers\Admin\AdminController;
+use App\Http\Controllers\Admin\AuthController as AdminAuthController;
 use App\Http\Controllers\Admin\CertificateController;
+use App\Http\Controllers\Admin\DashboardController;
 use App\Http\Controllers\Admin\MonitorController;
+use App\Http\Controllers\Admin\PaymentController as AdminPaymentController;
 use App\Http\Controllers\Admin\UpgradeController;
 use App\Http\Controllers\ArtifactDownloadController;
 use App\Http\Controllers\ClientController;
 use App\Http\Controllers\HostController;
+use App\Http\Controllers\PaymentNotifyController;
 use App\Http\Controllers\Portal\AuthController;
+use App\Http\Controllers\Portal\PaymentController as PortalPaymentController;
 use App\Http\Controllers\Portal\PortalController;
 use App\Http\Controllers\ServerController;
 use App\Http\Controllers\TunnelController;
 use Illuminate\Support\Facades\Route;
+
+// ---- 管理端登录（管理 UI，Sanctum token；仅 is_admin）----
+Route::post('/admin/login', [AdminAuthController::class, 'login'])->middleware('throttle:10,1');
 
 // ---- P2 用户自助门户（DESIGN.md §8）----
 Route::prefix('portal')->group(function () {
@@ -32,13 +40,31 @@ Route::prefix('portal')->group(function () {
 
         Route::get('/approvals', [PortalController::class, 'approvals']);
         Route::get('/bills', [PortalController::class, 'bills']);
+
+        // 支付（充值 / 账单支付）
+        Route::get('/payments/channels', [PortalPaymentController::class, 'channels']);
+        Route::get('/payments', [PortalPaymentController::class, 'index']);
+        Route::post('/payments', [PortalPaymentController::class, 'store']);
+        Route::get('/payments/{payment}', [PortalPaymentController::class, 'show']);
+        Route::post('/payments/{payment}/mock-pay', [PortalPaymentController::class, 'mockPay']);
     });
+});
+
+// 支付渠道异步回调（公开端点，验签失败拒绝）
+Route::prefix('payments')->group(function () {
+    Route::post('/alipay/notify', [PaymentNotifyController::class, 'alipay']);
+    Route::post('/wechat/notify', [PaymentNotifyController::class, 'wechat']);
 });
 
 // ---- 管理端（is_admin）：审批 / 套餐 / 充值 / 结算 ----
 Route::prefix('admin')
     ->middleware(['auth:sanctum', 'admin'])
     ->group(function () {
+        Route::get('/me', [AdminAuthController::class, 'me']);
+        Route::post('/logout', [AdminAuthController::class, 'logout']);
+
+        Route::get('/dashboard', [DashboardController::class, 'index']);
+
         Route::get('/approvals', [AdminController::class, 'approvals']);
         Route::post('/approvals/{approval}/approve', [AdminController::class, 'approve']);
         Route::post('/approvals/{approval}/reject', [AdminController::class, 'reject']);
@@ -50,9 +76,15 @@ Route::prefix('admin')
         Route::post('/users/{user}/recharge', [AdminController::class, 'recharge']);
         Route::post('/settle', [AdminController::class, 'settle']);
 
+        // 账单与支付流水（支付渠道：支付宝 / 微信）
+        Route::get('/bills', [AdminPaymentController::class, 'bills']);
+        Route::get('/payments', [AdminPaymentController::class, 'index']);
+
         // 证书子系统（DESIGN.md §7，阶段 3）
         Route::get('/certificates', [CertificateController::class, 'index']);
         Route::post('/certificates', [CertificateController::class, 'store']);
+        Route::post('/certificates/issue', [CertificateController::class, 'issue']);
+        Route::post('/certificates/verify-all', [CertificateController::class, 'verifyAll']);
         Route::post('/certificates/{certificate}/deploy/{server}', [CertificateController::class, 'deploy']);
         Route::post('/certificates/{certificate}/enable-https/{server}', [CertificateController::class, 'enableHttps']);
         Route::post('/certificates/{certificate}/rotate/{server}', [CertificateController::class, 'rotate']);
@@ -85,6 +117,10 @@ Route::prefix('nps')
     Route::post('/servers', [ServerController::class, 'store']);
     Route::get('/servers/{server}', [ServerController::class, 'show']);
     Route::post('/servers/{server}/sync', [ServerController::class, 'sync']);
+    Route::get('/servers/{server}/config', [ServerController::class, 'config']);
+    Route::post('/servers/{server}/config', [ServerController::class, 'saveConfig']);
+    Route::post('/servers/{server}/restart', [ServerController::class, 'restart']);
+    Route::get('/servers/{server}/cert', [ServerController::class, 'cert']);
     Route::delete('/servers/{server}', [ServerController::class, 'destroy']);
 
     // client 管理

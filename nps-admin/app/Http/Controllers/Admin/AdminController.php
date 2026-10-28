@@ -84,6 +84,7 @@ class AdminController extends Controller
     {
         return response()->json([
             'data' => User::with('wallet', 'activeSubscription.plan')
+                ->withCount('npsClients')
                 ->orderByDesc('id')->paginate(50),
         ]);
     }

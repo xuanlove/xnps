@@ -59,7 +59,7 @@
 
 ```bash
 # 以 linux_amd64 为例，其余平台见 dist/ 发布包
-tar -zxvf xnps-0.26.10-ext0.2.0-linux-amd64.tar.gz && cd xnps
+tar -zxvf server-0.26.10-ext0.3.0-linux-amd64.tar.gz && cd server-0.26.10-ext0.3.0-linux-amd64
 # 编辑 conf/nps.conf（务必修改 auth_key / web_username / web_password）
 sudo ./xnps start        # 注册为系统服务并启动（支持 install/start/stop/restart/uninstall）
 sudo ./xnps              # 或前台运行
@@ -77,12 +77,57 @@ sudo ./xnps              # 或前台运行
 cd nps-admin
 composer install && cp .env.example .env && php artisan key:generate
 php artisan migrate --force
+# 创建管理员（管理控制台登录）
+php artisan nps:admin admin@example.com
 # 注册一台 nps 服务器（CLI 免登录）
 php artisan nps:register <名称> http://<nps地址>:<web端口> <auth_key>
 php artisan queue:work --queue=nps-sync   # 同步循环
 ```
 
-详细部署（含 systemd、HTTPS 启用防自锁顺序、升级流水线）见 [DELIVERY.md](DELIVERY.md)。
+**管理控制台**：构建前端后访问 `http://<管理端>/admin`
+
+```bash
+cd nps-admin && npm install && npm run build
+# 生产环境建议设 ASSET_URL=/（反向代理/多域名下避免跨域绝对资源 URL）
+```
+
+控制台功能：仪表盘、服务器（探活/同步/配置/证书）、客户端、隧道、域名解析、审批、计费与支付（套餐/钱包/账单/支付流水）、证书（上传/certd/内置 ACME/部署/HTTPS/轮换/对账）、版本升级（制品/灰度/回滚）、监控告警与指标曲线。
+
+### 支付渠道（支付宝 / 微信支付 v3）
+
+在 `nps-admin/.env` 配置（详见 `config/payments.php`）：
+
+```ini
+PAYMENT_DEFAULT_CHANNEL=alipay        # alipay | wechat | mock
+ALIPAY_ENABLED=true
+ALIPAY_APP_ID=...
+ALIPAY_PRIVATE_KEY=...                # PEM 内容（\n 转义）或文件路径
+ALIPAY_PUBLIC_KEY=...
+ALIPAY_NOTIFY_URL=https://<管理端>/api/payments/alipay/notify
+
+WECHAT_PAY_ENABLED=true
+WECHAT_PAY_APP_ID=...
+WECHAT_PAY_MCH_ID=...
+WECHAT_PAY_SERIAL_NO=...
+WECHAT_PAY_PRIVATE_KEY=...
+WECHAT_PAY_API_V3_KEY=...             # 32 字节
+WECHAT_PAY_PLATFORM_CERT=...          # 微信支付平台证书（PEM）
+WECHAT_PAY_NOTIFY_URL=https://<管理端>/api/payments/wechat/notify
+```
+
+- 门户用户通过 `POST /api/portal/payments` 创建充值/账单支付订单，返回二维码内容；回调验签后幂等入账（充值入钱包、账单支付标记已付）。
+- `mock` 渠道仅用于开发联调（生产默认关闭），可通过 `POST /api/portal/payments/{id}/mock-pay` 模拟到账。
+- 回调端点公开但强制验签：支付宝 RSA2、微信支付 v3（平台证书验签 + APIv3 Key AES-256-GCM 解密）。
+
+### 证书来源（certd / 内置 ACME）
+
+- **certd**：`NPS_ACME_MODE=certd`，`NPS_ACME_CERTD_URL` + `NPS_ACME_CERTD_TOKEN`，由 certd 完成 DNS-01（支持通配符）。
+- **内置 ACME**：`NPS_ACME_MODE=builtin`，由 nps 自身完成 HTTP-01（`golang.org/x/crypto/acme`）：
+  - 要求目标域名解析到该 nps，且 `http_proxy_port`（通常 80）公网可达；
+  - 不支持通配符；挑战由 nps HTTP 监听器的 `/.well-known/acme-challenge/` 应答；
+  - 证书私钥在 nps 侧生成后回传管理端入库（私钥加密存储），部署仍走 `/ext/cert` 唯一入口；
+  - `NPS_ACME_DIRECTORY_URL` 仅允许 Let's Encrypt 生产/测试目录（防 SSRF），首次建议先用 staging。
+- 管理端「证书」页可签发、部署、启用 HTTPS（防自锁顺序）、轮换与全平台指纹对账。
 
 ## 构建与打包
 
@@ -96,7 +141,7 @@ php artisan queue:work --queue=nps-sync   # 同步循环
 ## 版本命名
 
 ```
-{上游基线版本}-ext{扩展模块版本}    例如 0.26.10-ext0.2.0
+{上游基线版本}-ext{扩展模块版本}    例如 0.26.10-ext0.3.0
 ```
 
 - 上游基线版本（`lib/version`）：跟随上游协议兼容性，npc 握手校验以 `core_version`（最低兼容 0.26.0）为准；
@@ -141,6 +186,20 @@ php artisan queue:work --queue=nps-sync   # 同步循环
 - 新增 `build-xnps.sh`（全平台构建打包脚本）、本 README、各发布包 `RELEASE.md`；
 - `ExtVersion` 0.1.0 → 0.2.0（随第 2 轮行为变更递增）；
 - **nps-admin/**（Laravel 集中管理端）为全新独立组件，不属于上游代码。
+
+### 第 4 轮：管理控制台 / 支付 / 内置 ACME（ext 0.3.0）
+
+| 文件 / 模块 | 类型 | 说明 |
+|---|---|---|
+| `server/ext/acme.go`、`lib/acmechallenge/` | 新增 | 内置 ACME（Let's Encrypt HTTP-01）；挑战由 HTTP 监听器应答 |
+| `web/controllers/ext.go`、`web/routers/router.go` | 侵入 | 新增 `POST /ext/acme/issue`（2 行路由 + 1 个方法） |
+| `server/proxy/http.go` | 侵入 3 行 | HTTP-01 挑战路径优先于 host 路由 |
+| `nps-admin/resources/js/admin/`、`admin.blade.php`、`admin.css` | 新增 | Vue 3 管理控制台（10 个页面） |
+| `nps-admin/app/Services/Payments/` | 新增 | 支付宝 RSA2 / 微信支付 v3（验签 + AES-GCM 解密）/ mock 驱动 |
+| `nps-admin/app/Services/Cert/BuiltinAcmeProvider.php` | 新增 | 调 `/ext/acme/issue` 并入库 |
+| `nps-admin/app/Console/Commands/CreateAdminCommand.php` | 新增 | `php artisan nps:admin` 创建管理员 |
+| `nps-admin/database/migrations/2026_10_29_000001_create_payments_table.php` | 新增 | 支付订单表 |
+| 升级编排 | 修复 | 异步 Run 复用（不再重复创建）、版本签名口径统一、制品版本字符白名单 |
 
 ### 未修改的已知上游缺陷
 

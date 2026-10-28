@@ -16,9 +16,8 @@ import (
 )
 
 // ExtVersion 扩展模块版本，集中管理端据此做能力探测。
-// 0.2.0：/client/edit 改为显式传入才修改语义（AUDIT H2）、
-// conf 写回权限收紧、升级本地备份（见 README 修改记录）
-const ExtVersion = "0.2.0"
+// 0.3.0：新增内置 ACME（HTTP-01）签发端点；0.2.0 为 edit 语义与备份加固
+const ExtVersion = "0.3.0"
 
 var serviceInstance service.Service
 

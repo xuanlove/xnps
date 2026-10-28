@@ -66,6 +66,14 @@ class UpgradeOrchestrator
             ]);
         }
 
+        return $this->execute($run, $artifact, $serverIds, $canaryServerId, $observeSeconds);
+    }
+
+    /**
+     * 在既有 Run 上执行编排（异步 Job 复用控制器已创建的 Run，避免重复记录）
+     */
+    public function execute(UpgradeRun $run, UpgradeArtifact $artifact, array $serverIds, ?int $canaryServerId, int $observeSeconds): UpgradeRun
+    {
         // canary 优先，其余保持原顺序
         $ordered = array_values(array_unique(array_merge([$canaryServerId], array_diff($serverIds, [$canaryServerId]))));
 
@@ -219,6 +227,8 @@ class UpgradeOrchestrator
         $data = (array) $resp->data;
         $currentVersion = (string) ($data['version'] ?? '');
         $coreVersion = (string) ($data['core_version'] ?? '');
+        $extVersion = (string) ($data['ext_version'] ?? '');
+        $currentSignature = sprintf('%s-ext%s', $currentVersion, $extVersion);
 
         // 兼容矩阵：core version 必须不变（bridge 握手校验 md5(core version)，
         // 变了会导致旧 npc 全量握手失败——DESIGN.md §9.4）
@@ -240,10 +250,14 @@ class UpgradeOrchestrator
         }
 
         // 回滚可行性预检（AUDIT M6）：当前线上版本制品必须在库，
-        // 否则升级失败时无法自动回滚（服务器将陷死需人工带外恢复）
-        if (! UpgradeArtifact::where('version', $currentVersion)->exists()) {
+        // 否则升级失败时无法自动回滚（服务器将陷死需人工带外恢复）。
+        // 版本口径：制品 version 为 {core}-ext{ext} 签名；旧数据可能存裸 core，二者均兼容。
+        $oldArtifact = UpgradeArtifact::where('version', $currentSignature)
+            ->orWhere('version', $currentVersion)
+            ->first();
+        if (! $oldArtifact) {
             throw new \RuntimeException(
-                "old artifact {$currentVersion} not in library, rollback impossible (upload the currently running version to the artifact library first)",
+                "old artifact {$currentSignature} not in library, rollback impossible (upload the currently running version to the artifact library first)",
             );
         }
 
@@ -257,7 +271,7 @@ class UpgradeOrchestrator
         }
 
         return [
-            'current_version' => $currentVersion,
+            'current_version' => $currentSignature,
             'core_version' => $coreVersion,
             'online_npc' => NpsClient::where('server_id', $server->id)->where('is_connect', true)->count(),
             'conf_snapshot' => $confSnapshot,

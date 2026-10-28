@@ -168,6 +168,14 @@ class NpsApiClient
         return $this->call('POST', '/ext/restart');
     }
 
+    /**
+     * 内置 ACME 签发（nps 侧 HTTP-01，耗时可达 1-2 分钟；不重试避免重复下单）
+     */
+    public function acmeIssue(array $payload): NpsResponse
+    {
+        return $this->call('POST', '/ext/acme/issue', [], $payload, 210, 0);
+    }
+
     // ------------------------------------------------------------------
     // 核心调用
     // ------------------------------------------------------------------
@@ -176,16 +184,18 @@ class NpsApiClient
      * @param  array  $params  query/form 参数（签名自动注入）
      * @param  array|null  $json  JSON 请求体（ext 端点用；签名仍走 query）
      */
-    public function call(string $method, string $path, array $params = [], ?array $json = null): NpsResponse
+    public function call(string $method, string $path, array $params = [], ?array $json = null, ?int $timeoutSeconds = null, ?int $retries = null): NpsResponse
     {
         $method = strtoupper($method);
         $start = microtime(true);
         $params = $this->signParams($params);
+        $timeout = $timeoutSeconds ?? (int) config('nps.http_timeout');
+        $attempts = $retries !== null ? max(1, $retries + 1) : max(1, (int) config('nps.http_retries') + 1);
 
-        $attempt = function () use ($method, $path, $params, $json) {
+        $attempt = function () use ($method, $path, $params, $json, $timeout) {
             // TLS 校验按服务器配置（自签证书场景 false，CA 签发 true）；
             // 禁用重定向：nps 的 302（签名失败跳登录页）必须被识别而非跟随
-            $req = Http::timeout(config('nps.http_timeout'))
+            $req = Http::timeout($timeout)
                 ->withOptions([
                     'verify' => (bool) ($this->server->tls_verify ?? true),
                     'allow_redirects' => false,
@@ -226,7 +236,7 @@ class NpsApiClient
 
         try {
             $result = retry(
-                max(1, (int) config('nps.http_retries')) + 1,
+                $attempts,
                 $attempt,
                 function (int $attempts) {
                     // 指数退避：1s, 2s...

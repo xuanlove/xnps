@@ -27,6 +27,7 @@ require (
 	github.com/tjfoc/gmsm v1.4.0 // indirect
 	github.com/xtaci/kcp-go v5.4.20+incompatible
 	github.com/xtaci/lossyconn v0.0.0-20190602105132-8df528c0c9ae // indirect
+	golang.org/x/crypto v0.21.0 // indirect
 	golang.org/x/net v0.23.0
 )
 

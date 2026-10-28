@@ -102,6 +102,65 @@ class ServerController extends Controller
         ]);
     }
 
+    /**
+     * 读取 nps.conf（脱敏后的键值，AUDIT 白名单）
+     */
+    public function config(NpsServer $server, NpsApiClientFactory $factory): JsonResponse
+    {
+        $resp = $factory->for($server)->extConfigGet();
+        if (! $resp->ok) {
+            return response()->json(['error' => 'read config failed: '.$resp->msg], 502);
+        }
+
+        return response()->json(['data' => $resp->data]);
+    }
+
+    /**
+     * 写入 nps.conf（白名单键；敏感值传 ****** 视为不修改），可联动重启
+     */
+    public function saveConfig(Request $request, NpsServer $server, NpsApiClientFactory $factory): JsonResponse
+    {
+        $validated = $request->validate([
+            'entries' => 'required|array',
+            'entries.*' => 'string|max:1024',
+            'restart' => 'nullable|boolean',
+        ]);
+
+        $resp = $factory->for($server)->extConfigSet($validated['entries'], (bool) ($validated['restart'] ?? false));
+        if (! $resp->ok) {
+            return response()->json(['error' => 'write config failed: '.$resp->msg], 422);
+        }
+
+        if (! empty($validated['restart'])) {
+            $server->forceFill(['is_reachable' => false])->saveQuietly();
+        }
+
+        return response()->json(['data' => $resp->data]);
+    }
+
+    public function restart(NpsServer $server, NpsApiClientFactory $factory): JsonResponse
+    {
+        $resp = $factory->for($server)->extRestart();
+        if (! $resp->ok) {
+            return response()->json(['error' => 'restart failed: '.$resp->msg], 502);
+        }
+
+        return response()->json(['data' => ['restart' => 'scheduled']], 202);
+    }
+
+    /**
+     * 当前生效证书指纹（与证书库对账用）
+     */
+    public function cert(NpsServer $server, NpsApiClientFactory $factory): JsonResponse
+    {
+        $resp = $factory->for($server)->call('GET', '/ext/cert');
+        if (! $resp->ok) {
+            return response()->json(['error' => 'read certificate failed: '.$resp->msg], 502);
+        }
+
+        return response()->json(['data' => $resp->data]);
+    }
+
     public function destroy(NpsServer $server): JsonResponse
     {
         // 停用即停止同步循环（Job 检查 isActive 自然终止）
