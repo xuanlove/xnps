@@ -30,10 +30,10 @@ class HttpsProvisioner
     /**
      * 为一台服务器启用 HTTPS
      *
-     * @param  bool  $tlsVerify 切换 https 后是否校验证书（自签=false，CA 签发=true）
+     * @param  bool  $tlsVerify 切换 https 后是否校验证书（M1：默认 true；自签需显式传 false 并告警）
      * @return array 编排结果
      */
-    public function enable(NpsServer $server, Certificate $certificate, bool $tlsVerify = false): array
+    public function enable(NpsServer $server, Certificate $certificate, bool $tlsVerify = true): array
     {
         $steps = [];
 

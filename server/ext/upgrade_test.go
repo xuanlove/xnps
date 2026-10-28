@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"io/ioutil"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -39,7 +40,7 @@ func TestDownloadToFileStreamsAndHashes(t *testing.T) {
 	defer server.Close()
 
 	path := filepath.Join(t.TempDir(), "downloaded")
-	digest, err := downloadToFile(server.URL, path)
+	digest, err := downloadToFileWithClient(server.Client(), server.URL, path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +65,26 @@ func TestDownloadToFileRejectsHTTPError(t *testing.T) {
 	defer server.Close()
 
 	path := filepath.Join(t.TempDir(), "downloaded")
-	if _, err := downloadToFile(server.URL, path); err == nil {
+	if _, err := downloadToFileWithClient(server.Client(), server.URL, path); err == nil {
 		t.Fatal("expected HTTP error to be rejected")
+	}
+}
+
+func TestDownloadToFileRejectsPlainHTTP(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "downloaded")
+	if _, err := downloadToFile("http://example.com/nps", path); err == nil {
+		t.Fatal("expected plain http url to be rejected")
+	}
+}
+
+func TestIsBlockedIP(t *testing.T) {
+	blocked := []string{"127.0.0.1", "10.0.0.1", "192.168.1.1", "169.254.169.254", "::1", "fc00::1"}
+	for _, raw := range blocked {
+		if !isBlockedIP(net.ParseIP(raw)) {
+			t.Fatalf("expected %s to be blocked", raw)
+		}
+	}
+	if isBlockedIP(net.ParseIP("1.1.1.1")) {
+		t.Fatal("public ip should not be blocked")
 	}
 }

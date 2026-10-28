@@ -11,6 +11,7 @@ use App\Services\Portal\BillingService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Validation\Rules\Password;
 use Illuminate\Validation\ValidationException;
 
 /**
@@ -23,7 +24,7 @@ class AuthController extends Controller
         $validated = $request->validate([
             'name' => 'required|string|max:64',
             'email' => 'required|email|unique:users,email',
-            'password' => 'required|string|min:8',
+            'password' => ['required', 'string', Password::min(10)->letters()->numbers()],
         ]);
 
         $user = User::create([
@@ -50,7 +51,7 @@ class AuthController extends Controller
         }
 
         // token 30 天过期（AUDIT M7：Sanctum 默认永不过期）
-        $token = $user->createToken('portal', ['*'], now()->addDays(30))->plainTextToken;
+        $token = $user->createToken('portal', ['portal'], now()->addDays(30))->plainTextToken;
 
         return response()->json([
             'data' => ['user' => $user, 'token' => $token],
@@ -70,7 +71,7 @@ class AuthController extends Controller
         }
 
         // token 30 天过期（AUDIT M7：Sanctum 默认永不过期）
-        $token = $user->createToken('portal', ['*'], now()->addDays(30))->plainTextToken;
+        $token = $user->createToken('portal', ['portal'], now()->addDays(30))->plainTextToken;
 
         return response()->json([
             'data' => ['user' => $user, 'token' => $token],

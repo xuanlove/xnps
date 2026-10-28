@@ -19,7 +19,7 @@ use App\Http\Controllers\TunnelController;
 use Illuminate\Support\Facades\Route;
 
 // ---- 管理端登录（管理 UI，Sanctum token；仅 is_admin）----
-Route::post('/admin/login', [AdminAuthController::class, 'login'])->middleware('throttle:10,1');
+Route::post('/admin/login', [AdminAuthController::class, 'login'])->middleware('throttle:5,1');
 
 // ---- P2 用户自助门户（DESIGN.md §8）----
 Route::prefix('portal')->group(function () {
@@ -29,7 +29,7 @@ Route::prefix('portal')->group(function () {
         Route::post('/login', [AuthController::class, 'login']);
     });
 
-    Route::middleware('auth:sanctum')->group(function () {
+    Route::middleware(['auth:sanctum', 'abilities:portal'])->group(function () {
         Route::post('/logout', [AuthController::class, 'logout']);
         Route::get('/me', [AuthController::class, 'me']);
 
@@ -58,7 +58,7 @@ Route::prefix('payments')->group(function () {
 
 // ---- 管理端（is_admin）：审批 / 套餐 / 充值 / 结算 ----
 Route::prefix('admin')
-    ->middleware(['auth:sanctum', 'admin'])
+    ->middleware(['auth:sanctum', 'abilities:admin', 'admin', 'throttle:120,1'])
     ->group(function () {
         Route::get('/me', [AdminAuthController::class, 'me']);
         Route::post('/logout', [AdminAuthController::class, 'logout']);
@@ -98,6 +98,7 @@ Route::prefix('admin')
         // 版本滚动升级（DESIGN.md §9，阶段 4）
         Route::get('/upgrades/artifacts', [UpgradeController::class, 'artifacts']);
         Route::post('/upgrades/artifacts', [UpgradeController::class, 'artifactStore']);
+        Route::post('/upgrades/artifacts/{artifact}/rotate-token', [UpgradeController::class, 'rotateToken']);
         Route::post('/upgrades/start/{artifact}', [UpgradeController::class, 'start']);
         Route::get('/upgrades/runs', [UpgradeController::class, 'runs']);
         Route::get('/upgrades/runs/{run}', [UpgradeController::class, 'show']);
@@ -110,7 +111,7 @@ Route::get('/artifacts/{artifact}/download/{token}', [ArtifactDownloadController
     ->where('token', '[A-Za-z0-9]+');
 
 Route::prefix('nps')
-    ->middleware(['auth:sanctum', 'admin'])
+    ->middleware(['auth:sanctum', 'abilities:admin', 'admin', 'throttle:120,1'])
     ->group(function () {
     // 服务器纳管
     Route::get('/servers', [ServerController::class, 'index']);

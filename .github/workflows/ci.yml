@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+      - name: Vet (extension packages)
+        run: go vet ./cmd/nps ./web/... ./server/ext/... ./lib/acmechallenge/... ./lib/changelog/...
+      - name: Test (extension packages)
+        run: go test ./server/ext/... ./lib/acmechallenge/... ./lib/changelog/...
+      - name: Vulnerability scan (govulncheck)
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+          "$(go env GOPATH)/bin/govulncheck" ./server/... ./web/... ./lib/... ./cmd/nps
+
+  php:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: nps-admin
+    env:
+      APP_KEY: 'base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          tools: composer:v2
+          extensions: mbstring, pdo_sqlite, sqlite3, openssl, curl, zip
+      - name: Install dependencies
+        run: composer install --no-interaction --prefer-dist --no-progress
+      - name: Dependency audit
+        run: composer audit --no-dev
+      - name: Test
+        run: php artisan test

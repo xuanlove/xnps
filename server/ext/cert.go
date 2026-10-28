@@ -9,7 +9,9 @@ import (
 	"errors"
 	"fmt"
 	"io/ioutil"
+	"os"
 	"path/filepath"
+	"strings"
 
 	"ehang.io/nps/lib/common"
 
@@ -17,7 +19,7 @@ import (
 )
 
 // defaultCertPath / defaultKeyPath 证书默认落盘路径
-//（conf 未配置 web_cert_file/web_key_file 时使用）
+// （conf 未配置 web_cert_file/web_key_file 时使用）
 func defaultCertPath() string {
 	return filepath.Join(common.GetRunPath(), "conf", "web_cert.pem")
 }
@@ -26,25 +28,51 @@ func defaultKeyPath() string {
 	return filepath.Join(common.GetRunPath(), "conf", "web_key.pem")
 }
 
-func currentCertPath() string {
-	if p := beego.AppConfig.String("web_cert_file"); p != "" {
-		return p
+func currentCertPath() (string, error) {
+	p := beego.AppConfig.String("web_cert_file")
+	if p == "" {
+		p = defaultCertPath()
 	}
-	return defaultCertPath()
+
+	return safeConfPath(p, "web_cert_file")
 }
 
-func currentKeyPath() string {
-	if p := beego.AppConfig.String("web_key_file"); p != "" {
-		return p
+func currentKeyPath() (string, error) {
+	p := beego.AppConfig.String("web_key_file")
+	if p == "" {
+		p = defaultKeyPath()
 	}
-	return defaultKeyPath()
+
+	return safeConfPath(p, "web_key_file")
+}
+
+// safeConfPath 限制证书/私钥只能位于 nps 的 conf 目录内（AUDIT P2-5），
+// 防止通过 /ext/config 修改路径后读写任意文件。
+func safeConfPath(p, label string) (string, error) {
+	if !filepath.IsAbs(p) {
+		p = filepath.Join(common.GetRunPath(), p)
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return "", err
+	}
+	confDir, err := filepath.Abs(filepath.Join(common.GetRunPath(), "conf"))
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(confDir, abs)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return "", fmt.Errorf("%s must be under %s", label, confDir)
+	}
+
+	return abs, nil
 }
 
 // ApplyCert 校验并落盘证书（DESIGN.md §7 /ext/cert POST）。
 // 证书激活的唯一入口：certd 部署通道与 Laravel native 通道最终都
 // 调到这里，保证单一 SoT。
 // 行为：校验证书与私钥匹配 → 原子写文件 → 更新 conf 键
-//（web_cert_file/web_key_file/web_open_ssl=true）。
+// （web_cert_file/web_key_file/web_open_ssl=true）。
 // 注意：web_open_ssl 在 beego 内存中仍是旧值，重启后生效——
 // 首次启用 HTTPS 必须"先推证书、后开开关"，顺序由集中管理端编排。
 func ApplyCert(certPem, keyPem []byte) (map[string]interface{}, error) {
@@ -63,8 +91,15 @@ func ApplyCert(certPem, keyPem []byte) (map[string]interface{}, error) {
 			info["dns_names"] = cert.DNSNames
 		}
 	}
-	// 3. 落盘（私钥 0600）
-	certPath, keyPath := currentCertPath(), currentKeyPath()
+	// 3. 落盘（私钥 0600）；路径必须位于 conf 目录内
+	certPath, err := currentCertPath()
+	if err != nil {
+		return nil, err
+	}
+	keyPath, err := currentKeyPath()
+	if err != nil {
+		return nil, err
+	}
 	if err := ioutil.WriteFile(certPath, certPem, 0644); err != nil {
 		return nil, err
 	}
@@ -90,14 +125,21 @@ func ApplyCert(certPem, keyPem []byte) (map[string]interface{}, error) {
 // CertFingerprint 当前证书状态（/ext/cert GET），供集中管理端每日对账：
 // 校验各 nps 实际生效证书与证书库登记值一致（防 certd/Laravel 双 SoT 漂移）。
 func CertFingerprint() (map[string]interface{}, error) {
-	certPath := currentCertPath()
+	certPath, err := currentCertPath()
+	if err != nil {
+		return nil, err
+	}
+	keyPath, err := currentKeyPath()
+	if err != nil {
+		return nil, err
+	}
 	b, err := ioutil.ReadFile(certPath)
 	if err != nil {
 		return nil, fmt.Errorf("read cert error: %s", err.Error())
 	}
 	info := map[string]interface{}{
 		"cert_file": certPath,
-		"key_file":  currentKeyPath(),
+		"key_file":  keyPath,
 	}
 	if block, _ := pem.Decode(b); block != nil {
 		if cert, err := x509.ParseCertificate(block.Bytes); err == nil {

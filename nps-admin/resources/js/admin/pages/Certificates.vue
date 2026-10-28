@@ -120,9 +120,15 @@
                         <option value="certd">certd（流水线触发）</option>
                     </select>
                 </div>
-                <p v-if="deployAction === 'enable'" class="text-xs text-amber-600">
-                    启用 HTTPS 会依次推证书 → 写 web_open_ssl → 重启 → 探活 → 切换 api_url，过程中管理面短暂不可达。
-                </p>
+                <div v-if="deployAction === 'enable'" class="space-y-2">
+                    <label class="flex items-center gap-2 text-sm text-slate-700">
+                        <input v-model="enableTlsVerify" type="checkbox" class="h-4 w-4 rounded border-slate-300" />
+                        切换后校验证书链（CA 签发保持勾选；自签证书需取消并用 tls_verify=false）
+                    </label>
+                    <p class="text-xs text-amber-600">
+                        启用 HTTPS 会依次推证书 → 写 web_open_ssl → 重启 → 探活 → 切换 api_url，过程中管理面短暂不可达。
+                    </p>
+                </div>
                 <p v-if="deployAction === 'rotate'" class="text-xs text-amber-600">
                     轮换会部署新证书并重启 nps，随后做 HTTPS 探活与指纹核验。
                 </p>
@@ -157,6 +163,7 @@ const deployCert = ref(null);
 const deployAction = ref('deploy');
 const deployServerId = ref('');
 const deployChannel = ref('native');
+const enableTlsVerify = ref(true);
 
 const activeServers = computed(() => servers.value.filter((s) => s.status === 'active'));
 const deployTitle = computed(() => {
@@ -232,7 +239,7 @@ async function runDeploy() {
             await api.post(`/admin/certificates/${id}/deploy/${serverId}`, { channel: deployChannel.value });
             notice.value = '证书已部署';
         } else if (deployAction.value === 'enable') {
-            await api.post(`/admin/certificates/${id}/enable-https/${serverId}`);
+            await api.post(`/admin/certificates/${id}/enable-https/${serverId}`, { tls_verify: enableTlsVerify.value });
             notice.value = 'HTTPS 已启用并切换 api_url';
         } else {
             await api.post(`/admin/certificates/${id}/rotate/${serverId}`);

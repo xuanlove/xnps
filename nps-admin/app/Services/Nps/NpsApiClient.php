@@ -27,9 +27,18 @@ class NpsApiClient
      * 签名参数 / 私钥 / 敏感配置 / Basic 与门户凭据，命中即替换为 ******
      */
     private const SENSITIVE_KEYS = [
-        'auth_key', 'auth_crypt_key', 'public_vkey',
+        'auth_key', 'auth_crypt_key', 'public_vkey', 'vkey', 'verify_key',
         'web_password', 'password', 'basic_pass', 'p',
-        'key_pem_b64', 'cert_pem_b64', 'binary',
+        'key_pem_b64', 'cert_pem_b64', 'cert_pem', 'key_pem', 'binary',
+    ];
+
+    /** 敏感写操作：明文 HTTP 下默认告警，require_https=true 时拒绝（AUDIT M1） */
+    private const SENSITIVE_POST_PATHS = [
+        '/ext/cert',
+        '/ext/config',
+        '/ext/restart',
+        '/ext/upgrade',
+        '/ext/acme/issue',
     ];
 
     public function __construct(
@@ -201,6 +210,17 @@ class NpsApiClient
     {
         $method = strtoupper($method);
         $start = microtime(true);
+
+        // 明文 HTTP 下的敏感写操作（AUDIT M1）：默认告警，可配置强制拒绝
+        if ($this->isSensitivePost($method, $path)
+            && str_starts_with(strtolower((string) $this->server->api_url), 'http://')) {
+            $message = "sensitive nps operation over plain HTTP: {$method} {$path}";
+            if ((bool) config('nps.require_https')) {
+                return new NpsResponse(ok: false, msg: $message);
+            }
+            Log::warning($message, ['server' => $this->server->name]);
+        }
+
         $params = $this->signParams($params);
         $timeout = $timeoutSeconds ?? (int) config('nps.http_timeout');
         if ($retries !== null) {
@@ -294,6 +314,11 @@ class NpsApiClient
         return in_array($path, self::RETRYABLE_POST_PATHS, true);
     }
 
+    private function isSensitivePost(string $method, string $path): bool
+    {
+        return $method === 'POST' && in_array($path, self::SENSITIVE_POST_PATHS, true);
+    }
+
     /**
      * 签名注入（源码核实：md5(auth_key + timestamp)，±20s 窗口）
      */
@@ -356,7 +381,7 @@ class NpsApiClient
                     'params' => $this->redact($params),
                     'json' => $json !== null ? $this->maskSensitive($json) : null,
                 ],
-                'response' => $result->raw ?: null,
+                'response' => $result->raw ? $this->maskSensitive($result->raw) : null,
                 'status_code' => $result->statusCode,
                 'duration_ms' => (int) round($elapsed * 1000),
                 'ok' => $result->ok,
