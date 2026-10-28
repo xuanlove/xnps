@@ -1,3 +1,8 @@
 .idea
 nps
 npc
+nps-admin/vendor/
+nps-admin/node_modules/
+nps-admin/storage/logs/
+nps-admin/database/database.sqlite
+nps-admin/.env
