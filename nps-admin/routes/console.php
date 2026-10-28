@@ -58,6 +58,11 @@ Schedule::call(function () {
     app(\App\Services\Monitor\MonitoringService::class)->checkAll();
 })->everyFiveMinutes()->name('alert-check');
 
+// 支付订单过期回收（未支付超时置 expired）
+Schedule::call(function () {
+    app(\App\Services\Payments\PaymentService::class)->expirePending();
+})->everyFiveMinutes()->name('payment-expire');
+
 // 证书指纹全平台对账（DESIGN.md §7.2 双 SoT 防护）
 Schedule::call(function () {
     app(\App\Services\Cert\CertificateService::class)->reconcileAll();

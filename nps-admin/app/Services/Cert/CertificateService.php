@@ -49,13 +49,16 @@ class CertificateService
     }
 
     /**
-     * ACME 自动签发入库（AcmeProvider 路径，生产启用）
+     * ACME 自动签发入库（certd / 内置 ACME 两种来源）
+     *
+     * @param  string|null  $mode  certd|builtin（空=config nps.acme.mode）
      */
-    public function issueAcme(array $domains): Certificate
+    public function issueAcme(array $domains, ?NpsServer $server = null, ?string $mode = null): Certificate
     {
         $provider = app(AcmeProvider::class);
-        [$certPem, $keyPem] = $provider->issue($domains);
+        [$certPem, $keyPem] = $provider->issue($domains, $server, $mode);
         $meta = $this->validateAndParse($certPem, $keyPem);
+        $mode = $mode ?? (string) config('nps.acme.mode');
 
         return Certificate::create([
             'name' => implode(',', $domains),
@@ -64,7 +67,7 @@ class CertificateService
             'key_pem' => $keyPem,
             'sha256' => $meta['sha256'],
             'not_after' => $meta['not_after'],
-            'source' => 'acme',
+            'source' => $mode === 'builtin' ? 'acme-builtin' : 'acme',
             'active' => true,
         ]);
     }

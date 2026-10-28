@@ -463,6 +463,27 @@ func (s *ExtController) Restart() {
 	s.ServeJSON()
 }
 
+// AcmeIssue 内置 ACME 签发：POST /ext/acme/issue
+// 由 nps 自身通过 HTTP-01 完成域名校验（挑战由 HTTP 监听器应答），
+// 证书与私钥在 nps 侧生成后回传集中管理端入库。
+func (s *ExtController) AcmeIssue() {
+	if s.Ctx.Request.Method != "POST" {
+		s.failMsg("post only")
+		return
+	}
+	var req ext.ACMERequest
+	if err := s.readJSON(&req); err != nil {
+		s.failMsg(err.Error())
+		return
+	}
+	res, err := ext.IssueACME(&req)
+	if err != nil {
+		s.failMsg(err.Error())
+		return
+	}
+	s.okData(res)
+}
+
 // Upgrade 二进制升级：inline（base64 直传，小文件）或
 // url（从集中管理端制品库下载，大文件主路径）。
 // sha256 必填；成功后可带 restart=true 联动重启。

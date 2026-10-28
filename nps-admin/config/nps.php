@@ -86,9 +86,13 @@ return [
         'renew_days' => 30,
     ],
 
-    // ACME 来源（生产启用：mode=certd 走 certd 签发流水线；空=仅人工上传）
+    // ACME 来源（生产启用：mode=certd 走 certd 签发流水线；builtin 使用
+    // 内置 ACME（nps 侧 HTTP-01）；空=仅人工上传）
     'acme' => [
         'mode' => env('NPS_ACME_MODE', ''),
+        'email' => env('NPS_ACME_EMAIL', ''),
+        // 空=Let's Encrypt 生产目录；可选 staging 目录
+        'directory_url' => env('NPS_ACME_DIRECTORY_URL', ''),
         'certd_url' => env('NPS_ACME_CERTD_URL', ''),
         'certd_token' => env('NPS_ACME_CERTD_TOKEN', ''),
     ],

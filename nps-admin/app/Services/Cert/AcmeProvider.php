@@ -2,32 +2,44 @@
 
 namespace App\Services\Cert;
 
+use App\Models\NpsServer;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
 /**
- * ACME 自动签发来源（DESIGN.md §7.1 AcmeProvider）
+ * 证书签发来源路由（DESIGN.md §7.1 AcmeProvider）
  *
- * 生产部署两种对接模式（config nps.acme）：
- *   mode=certd  —— 调 certd 的签发 API（certd 负责 ACME DNS-01 全流程，
- *                  推荐通配符 *.mgmt.example.com，一张证书覆盖全部 nps 管理域名）
- *   mode=shell  —— 调用本机 acme.sh / certbot 命令产出证书文件
- *
- * 沙箱/内网环境无法完成真实 ACME 挑战（需公网域名 + DNS API），
- * 本实现为生产对接骨架：certd 模式完整实现 HTTP 调用；shell 模式留待部署时配置。
+ * 两种对接模式（config nps.acme.mode）：
+ *   certd   —— 调 certd 的签发 API（certd 负责 ACME DNS-01 全流程，
+ *              推荐通配符 *.mgmt.example.com，一张证书覆盖全部 nps 管理域名）
+ *   builtin —— 内置 ACME（Let's Encrypt），nps 侧 HTTP-01 签发；
+ *              需指定一台 active nps 作为挑战应答主机，不支持通配符
  */
 class AcmeProvider implements CertificateProviderInterface
 {
-    public function issue(array $domains): array
+    public function __construct(
+        private readonly BuiltinAcmeProvider $builtin,
+    ) {}
+
+    public function issue(array $domains, ?NpsServer $server = null, ?string $mode = null): array
     {
         $config = (array) config('nps.acme');
+        $mode = $mode ?? (string) ($config['mode'] ?? '');
 
-        if (($config['mode'] ?? '') === 'certd') {
+        if ($mode === 'certd') {
             return $this->issueViaCertd($domains, $config);
+        }
+        if ($mode === 'builtin') {
+            $server ??= NpsServer::where('status', 'active')->orderBy('id')->first();
+            if (! $server) {
+                throw new \RuntimeException('builtin ACME requires an active nps server');
+            }
+
+            return $this->builtin->issue($domains, $server, (string) ($config['email'] ?? ''));
         }
 
         throw new \RuntimeException(
-            'ACME provider not configured: set NPS_ACME_MODE=certd with certd_url, '.
+            'ACME provider not configured: set NPS_ACME_MODE=certd|builtin, '.
             'or use manual upload (CertificateService::import)'
         );
     }

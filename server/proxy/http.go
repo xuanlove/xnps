@@ -14,6 +14,7 @@ import (
 	"sync"
 
 	"ehang.io/nps/bridge"
+	"ehang.io/nps/lib/acmechallenge"
 	"ehang.io/nps/lib/cache"
 	"ehang.io/nps/lib/common"
 	"ehang.io/nps/lib/conn"
@@ -266,6 +267,11 @@ func (s *httpServer) NewServer(port int, scheme string) *http.Server {
 	return &http.Server{
 		Addr: ":" + strconv.Itoa(port),
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// ACME HTTP-01：在 HTTP 监听器（通常 80 端口）上应答挑战，
+			// 不进入 host 路由（内置 ACME 签发，见 server/ext/acme.go）
+			if scheme == "http" && acmechallenge.Serve(w, r) {
+				return
+			}
 			r.URL.Scheme = scheme
 			s.handleTunneling(w, r)
 		}),

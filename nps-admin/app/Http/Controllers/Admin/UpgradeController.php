@@ -35,7 +35,7 @@ class UpgradeController extends Controller
     public function artifactStore(Request $request): JsonResponse
     {
         $validated = $request->validate([
-            'version' => 'required|string|max:64|unique:upgrade_artifacts,version',
+            'version' => ['required', 'string', 'max:64', 'regex:/^[A-Za-z0-9._-]+$/', 'unique:upgrade_artifacts,version'],
             'channel' => 'nullable|in:stable,canary',
             'compatible_core_version' => 'nullable|string|max:32',
             'notes' => 'nullable|string|max:1024',

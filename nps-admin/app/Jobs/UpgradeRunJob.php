@@ -40,7 +40,8 @@ class UpgradeRunJob implements ShouldQueue
         }
 
         try {
-            $finished = $orchestrator->start(
+            $finished = $orchestrator->execute(
+                $run,
                 $run->artifact,
                 $run->server_ids,
                 $run->canary_server_id,
