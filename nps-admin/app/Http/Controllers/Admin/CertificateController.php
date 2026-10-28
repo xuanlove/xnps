@@ -9,6 +9,7 @@ use App\Services\Cert\CertificateService;
 use App\Services\Cert\HttpsProvisioner;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
 
 /**
  * 证书管理（DESIGN.md §7）：上传 / 部署 / HTTPS 启用 / 轮换 / 对账
@@ -101,7 +102,14 @@ class CertificateController extends Controller
      */
     public function enableHttps(Request $request, Certificate $certificate, NpsServer $server, HttpsProvisioner $provisioner): JsonResponse
     {
-        $tlsVerify = (bool) $request->boolean('tls_verify', false);
+        // M1：默认校验证书；自签证书需调用方显式传 tls_verify=false，并留告警
+        $tlsVerify = $request->has('tls_verify') ? $request->boolean('tls_verify') : true;
+        if (! $tlsVerify) {
+            Log::warning('https enabled with tls_verify=false (self-signed certificate?)', [
+                'server' => $server->name,
+                'certificate' => $certificate->name,
+            ]);
+        }
 
         try {
             $result = $provisioner->enable($server, $certificate, $tlsVerify);

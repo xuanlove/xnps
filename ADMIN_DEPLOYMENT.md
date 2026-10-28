@@ -457,10 +457,17 @@ NPS_CERTD_TOKEN=
 ## 10. 版本升级（制品库）
 
 1. 上传制品：版本号必须为 `{core}-ext{ext}`（如 `0.26.10-ext0.3.0`），字符限 `[A-Za-z0-9._-]`，≤256MB。
-2. 预检要求：`core_version` 与制品 `compatible_core_version` 一致；在线 npc 版本一致；**当前运行版本制品必须在库**（用于回滚）。
-3. 启动升级：默认异步；可设 canary 与观察秒数；单批建议 ≤10 台。
-4. nps 侧本地备份：`.bak-ext` / `.bak-ext.old`；回滚失败会告警并写 `alerts`。
-5. Windows：运行中的 exe 不可覆盖，会写 `xnps-update.exe`，需人工替换并重启。
+2. 制品下载 URL 的 token 默认 **7 天过期**（`nps.artifact_token_days`），可在控制台轮换；下载文件流式输出。
+3. nps 侧 `url` 模式仅允许 **HTTPS**、禁止重定向；默认拒绝内网/回环地址。若制品库在内网，需在 nps.conf 显式配置白名单：
+   ```ini
+   upgrade_allowed_hosts=artifacts.example.com,10.0.0.5
+   ```
+   名单内主机允许内网地址（同时不再经过环境 HTTP 代理）。
+4. 二进制落盘后会校验 **ELF / PE / Mach-O** 头与当前 `GOOS/GOARCH`，错架构制品会被拒绝。
+5. 预检要求：`core_version` 与制品 `compatible_core_version` 一致；在线 npc 版本一致；**当前运行版本制品必须在库**（用于回滚）。
+6. 启动升级：默认异步；可设 canary 与观察秒数；单批建议 ≤10 台。
+7. nps 侧本地备份：`.bak-ext` / `.bak-ext.old`；回滚失败会告警并写 `alerts`。
+8. Windows：运行中的 exe 不可覆盖，会写 `xnps-update.exe`，需人工替换并重启。
 
 ## 11. 发布、回滚与备份
 
@@ -524,25 +531,34 @@ tail -f storage/logs/laravel-$(date +%F).log
 | 启用 HTTPS 后失联 | 按 §9 自锁恢复流程关闭 `web_open_ssl` |
 | 升级 Run 一直 running | worker 超时/中断；检查 `failed_jobs`，必要时将 Run 标记 failed 后重试 |
 | 升级预检失败 | 旧版本制品未入库；版本签名不是 `{core}-ext{ext}`；core 版本不一致 |
+| 升级下载被拒绝 | 制品 URL 非 HTTPS、重定向、或解析到内网/回环地址；内网制品库需配置 `upgrade_allowed_hosts` |
+| 升级提示架构不匹配 | 制品与目标服务器 `GOOS/GOARCH` 不一致（ELF/PE/Mach-O 头校验） |
+| `/ext/cert` 报路径错误 | `web_cert_file` / `web_key_file` 不在 nps `conf/` 目录内 |
+| 管理 API 401/403 | token 过期或 ability 不匹配（admin/portal），重新登录 |
 | `jobs` 表持续增长 | 检查是否有多个 scheduler（`schedule:work` 与 cron 并存）；Job 的 `ShouldBeUnique` 会丢弃重复派发，确认无重复部署 |
 
 ## 13. 安全基线
 
 - `APP_ENV=production`、`APP_DEBUG=false`；`/admin` 与 `/api/admin/*` 建议限制 VPN/办公网 IP。
+- 管理员登录限流 5 次/分钟；`/api/admin` 与 `/api/nps` 限流 120 次/分钟；管理 token 12h、门户 token 30 天，且按 ability 隔离（`admin` / `portal`）。
+- 门户注册密码策略：至少 10 位且包含字母与数字。
+- `NPS_REQUIRE_HTTPS=true` 时，`/ext/cert`、`/ext/config`、`/ext/restart`、`/ext/upgrade`、`/ext/acme/issue` 在明文 HTTP 下会被直接拒绝；默认 false 仅写 warning，生产建议开启。
+- 证书与私钥只允许写入 nps 的 `conf/` 目录（`/ext/cert` 会拒绝目录外路径）。
+- 制品下载 token 默认 7 天过期，支持轮换；下载为流式输出，需限制 VPN/来源。
 - 管理员使用强密码；`nps:admin` 自动生成密码仅显示一次。
 - 全站 HTTPS；`SESSION_ENCRYPT=true`、`SESSION_SECURE_COOKIE=true`。
 - `.env`、支付私钥、平台证书权限 600，属主 `www-data`；禁止入库。
 - 数据库账号最小权限；生产关闭 mock 支付。
-- 审计日志默认保留 90 天；敏感字段（私钥、密码、auth_key）写入前已脱敏。
-- 定期更新 PHP/Laravel/系统依赖；发布前执行 `composer audit`。
-- 管理端与被管 nps 之间建议使用 CA 证书并保持 `tls_verify=true`；自签场景需明确风险评估。
+- 审计日志默认保留 90 天；请求/响应中的私钥、密码、auth_key、vkey 已脱敏。
+- 定期更新 PHP/Laravel/系统依赖；发布前执行 `composer audit` 与 `govulncheck ./server/... ./web/... ./lib/... ./cmd/nps`（当前调用路径 0 漏洞），SBOM 见 `sbom/xnps.cdx.json`（可用 `syft scan dir:. -o cyclonedx-json=...` 重建）。
+- 管理端与被管 nps 之间建议使用 CA 证书并保持 `tls_verify=true`；启用 HTTPS 默认校验证书链，自签场景需在启用动作中显式关闭并会写 warning 日志。
 
 ## 14. 已知限制
 
 - 支付：未实现退款、发票、支付渠道对账报表。
 - 监控：仅落库 + webhook，未内置 Prometheus 指标端点。
 - 同步任务推荐常驻 `schedule:work`；cron `schedule:run` 也可运行亚分钟事件，但需 `flock` 防进程重叠。
-- 管理 API 默认无限流（登录接口有限流）；生产建议在 Nginx/WAF 层加限制。
+- 管理 API 已内置 120 次/分钟限流与登录 5 次/分钟限流；仍建议在 Nginx/WAF 层叠加来源限制。
 - 未提供多租户强隔离与 HA 部署方案；单管理端故障会影响纳管操作，但不影响 nps 数据面转发。
 
 ## 附录 A：生产 `.env` 完整模板

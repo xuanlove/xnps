@@ -61,9 +61,29 @@ class UpgradeController extends Controller
             'compatible_core_version' => $validated['compatible_core_version'] ?? '0.26.0',
             'notes' => $validated['notes'] ?? '',
             'download_token' => Str::random(48),
+            'download_token_expires_at' => now()->addDays((int) config('nps.artifact_token_days', 7)),
         ]);
 
         return response()->json(['data' => $artifact], 201);
+    }
+
+    /**
+     * 轮换下载 token（原 token 立即失效，AUDIT L1）
+     */
+    public function rotateToken(UpgradeArtifact $artifact): JsonResponse
+    {
+        $token = Str::random(48);
+        $artifact->update([
+            'download_token' => $token,
+            'download_token_expires_at' => now()->addDays((int) config('nps.artifact_token_days', 7)),
+        ]);
+
+        return response()->json(['data' => [
+            'id' => $artifact->id,
+            'token' => $token,
+            'expires_at' => $artifact->download_token_expires_at?->toIso8601String(),
+            'download_url' => $artifact->fresh()->downloadUrl(),
+        ]]);
     }
 
     // ------------------------------------------------------------------

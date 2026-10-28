@@ -17,6 +17,7 @@ return Application::configure(basePath: dirname(__DIR__))
         // admin 别名中间件：校验 users.is_admin（管理端路由）
         $middleware->alias([
             'admin' => \App\Http\Middleware\EnsureUserIsAdmin::class,
+            'abilities' => \Laravel\Sanctum\Http\Middleware\CheckAbilities::class,
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {

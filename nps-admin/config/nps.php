@@ -12,6 +12,10 @@ return [
     // 失败重试次数（指数退避）
     'http_retries' => 2,
 
+    // 敏感操作（写证书/配置/升级/重启）是否强制 HTTPS（AUDIT M1）
+    // false 时仅写 warning 日志；生产建议 true
+    'require_https' => env('NPS_REQUIRE_HTTPS', false),
+
     // ---- 三层同步（DESIGN.md §6.1）----
     // 调度频率固定在 routes/console.php（10s/30s/5min/6h），由常驻
     // `php artisan schedule:work` 驱动；Job 均为一次性且 ShouldBeUnique。
@@ -30,6 +34,9 @@ return [
 
     // 镜像批量 upsert 每批行数
     'upsert_chunk' => 1000,
+
+    // 升级制品下载 token 有效天数（AUDIT L1）
+    'artifact_token_days' => 7,
 
     // ---- 端口池 ----
 

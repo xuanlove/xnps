@@ -28,7 +28,7 @@
 
 | 组件 | 技术栈 | 说明 |
 |---|---|---|
-| **xnps**（服务端内核） | Go 1.20+ | 上游 nps 0.26.10 + `nps-admin-ext` 扩展模块（见修改记录） |
+| **xnps**（服务端内核） | Go 1.26+ | 上游 nps 0.26.10 + `nps-admin-ext` 扩展模块（见修改记录） |
 | **xnpc**（客户端） | Go | 与上游 npc 功能一致（同源构建，改名随包发布） |
 | **nps-admin**（集中管理端） | Laravel 12 / PHP 8.2+ | 多服务器纳管、三层同步、自助门户、审批/计费/证书/滚动升级（独立新增组件，不含上游代码） |
 
@@ -39,7 +39,7 @@
 - **轻量监控** `/ext/system`：O(1) 系统指标（原版 dashboard 为 O(C×T) 且有数据竞争），10 万级 client 下实测 0.1–1ms。
 - **变更日志** `/ext/version` + `/ext/changes`：内存环形变更日志（容量 1 万条），集中端每 10s 轮询 8 字节级版本号，变化才拉增量——替代高频轮询原版 `/client/list`（原版 20 万隧道实测 >60s 超时，`/ext/list` 游标分页 <32ms）。
 - **在线/流量通道** `/ext/online`、`/ext/flow`（16 分片轮转采集，O(T+H)/片）。
-- **运维闭环** `/ext/config`（白名单配置读写 + 原子写 + 备份）、`/ext/cert`（证书下发/指纹对账，激活唯一入口）、`/ext/restart`（202 + 延迟触发）、`/ext/upgrade`（inline/url 双模式，sha256 强校验，rename 原子替换 + 本地双份备份）。
+- **运维闭环** `/ext/config`（白名单配置读写 + 原子写 + 备份）、`/ext/cert`（证书下发/指纹对账，激活唯一入口）、`/ext/restart`（202 + 延迟触发）、`/ext/upgrade`（inline/url 双模式，sha256 强校验，仅 HTTPS + 内网地址防护，rename 原子替换 + 本地双份备份）。
 - **集中管理端能力**：三层同步（L1 写后回读 / L2 10s 增量 / L3 6h 全量对账）、Saga 写补偿、端口池预占、审批流、月度配额计费、证书全生命周期、灰度滚动升级。
 
 ### 性能实测（10 万 client / 20 万 tunnel）
@@ -140,6 +140,14 @@ WECHAT_PAY_NOTIFY_URL=https://<管理端>/api/payments/wechat/notify
 ```
 
 发布包命名：`{server|client}-{版本}-{GOOS}-{GOARCH}[-vN].tar.gz`，server 包内含 `xnps` 二进制、`conf/` 默认配置、`web/views`、`web/static`、`LICENSE`、`RELEASE.md`；client 包内含 `xnpc` 与 `conf/npc.conf`。
+
+**供应链检查**（I2 安全基线，CI 已固化于 `.github/workflows/ci.yml`）：
+
+```bash
+govulncheck ./server/... ./web/... ./lib/... ./cmd/nps   # 调用路径漏洞扫描（当前 0）
+(cd nps-admin && composer audit --no-dev)                 # PHP 依赖公告（当前无）
+syft scan dir:. -o cyclonedx-json=sbom/xnps.cdx.json      # SBOM（Go/PHP/npm 组件清单）
+```
 
 ## 版本命名
 

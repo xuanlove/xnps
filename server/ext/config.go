@@ -29,46 +29,47 @@ type confKeyMeta struct {
 // confKeys 配置键白名单：不在名单内的键一律拒绝写入。
 // 键集合来自 conf/nps.conf 与源码中全部 AppConfig 读取点。
 var confKeys = map[string]confKeyMeta{
-	"bridge_type":             {kind: "string"},
-	"bridge_port":             {kind: "port"},
-	"bridge_ip":               {kind: "string"},
-	"public_vkey":             {kind: "string", sensitive: true},
-	"ip_limit":                {kind: "bool"},
-	"disconnect_timeout":      {kind: "int"},
-	"log_level":               {kind: "int"},
-	"log_path":                {kind: "string"},
-	"p2p_port":                {kind: "port"},
-	"p2p_ip":                  {kind: "string"},
-	"http_proxy_port":         {kind: "port"},
-	"https_proxy_port":        {kind: "port"},
-	"https_default_cert_file": {kind: "string"},
-	"https_default_key_file":  {kind: "string"},
-	"https_just_proxy":        {kind: "bool"},
-	"http_cache":              {kind: "bool"},
-	"http_cache_length":       {kind: "int"},
-	"http_add_origin_header":  {kind: "bool"},
-	"allow_ports":             {kind: "string"},
-	"flow_store_interval":     {kind: "int"},
-	"web_host":                {kind: "string"},
-	"web_port":                {kind: "port"},
-	"web_username":            {kind: "string"},
-	"web_password":            {kind: "string", sensitive: true},
-	"web_base_url":            {kind: "string"},
-	"web_open_ssl":            {kind: "bool"},
-	"web_cert_file":           {kind: "string"},
-	"web_key_file":            {kind: "string"},
-	"auth_key":                {kind: "string", sensitive: true},
-	"auth_crypt_key":          {kind: "string", sensitive: true},
-	"allow_user_login":        {kind: "bool"},
-	"allow_user_register":     {kind: "bool"},
+	"bridge_type":                {kind: "string"},
+	"bridge_port":                {kind: "port"},
+	"bridge_ip":                  {kind: "string"},
+	"public_vkey":                {kind: "string", sensitive: true},
+	"ip_limit":                   {kind: "bool"},
+	"disconnect_timeout":         {kind: "int"},
+	"log_level":                  {kind: "int"},
+	"log_path":                   {kind: "string"},
+	"p2p_port":                   {kind: "port"},
+	"p2p_ip":                     {kind: "string"},
+	"http_proxy_port":            {kind: "port"},
+	"https_proxy_port":           {kind: "port"},
+	"https_default_cert_file":    {kind: "string"},
+	"https_default_key_file":     {kind: "string"},
+	"https_just_proxy":           {kind: "bool"},
+	"http_cache":                 {kind: "bool"},
+	"http_cache_length":          {kind: "int"},
+	"http_add_origin_header":     {kind: "bool"},
+	"allow_ports":                {kind: "string"},
+	"flow_store_interval":        {kind: "int"},
+	"web_host":                   {kind: "string"},
+	"web_port":                   {kind: "port"},
+	"web_username":               {kind: "string"},
+	"web_password":               {kind: "string", sensitive: true},
+	"web_base_url":               {kind: "string"},
+	"web_open_ssl":               {kind: "bool"},
+	"web_cert_file":              {kind: "string"},
+	"web_key_file":               {kind: "string"},
+	"auth_key":                   {kind: "string", sensitive: true},
+	"auth_crypt_key":             {kind: "string", sensitive: true},
+	"allow_user_login":           {kind: "bool"},
+	"allow_user_register":        {kind: "bool"},
 	"allow_user_change_username": {kind: "bool"},
-	"allow_flow_limit":        {kind: "bool"},
-	"allow_rate_limit":        {kind: "bool"},
+	"allow_flow_limit":           {kind: "bool"},
+	"allow_rate_limit":           {kind: "bool"},
 	"allow_connection_num_limit": {kind: "bool"},
-	"allow_multi_ip":          {kind: "bool"},
-	"allow_tunnel_num_limit":  {kind: "bool"},
-	"allow_local_proxy":       {kind: "bool"},
-	"system_info_display":     {kind: "bool"},
+	"allow_multi_ip":             {kind: "bool"},
+	"allow_tunnel_num_limit":     {kind: "bool"},
+	"allow_local_proxy":          {kind: "bool"},
+	"system_info_display":        {kind: "bool"},
+	"upgrade_allowed_hosts":      {kind: "string"},
 }
 
 // ConfEntry 配置读取结果的一条键值
@@ -169,13 +170,30 @@ func ReadConfig() ([]ConfEntry, error) {
 			continue
 		}
 		e := ConfEntry{Key: l.key, Value: l.value}
-		if meta, ok := confKeys[l.key]; ok && meta.sensitive {
+		if isSensitiveKey(l.key) {
 			e.Sensitive = true
 			e.Value = mask
 		}
 		entries = append(entries, e)
 	}
 	return entries, nil
+}
+
+// isSensitiveKey 读取脱敏判断（AUDIT I2）：白名单标记 + 常见敏感词兜底，
+// 防止 conf 中的未知键（如自定义 token）明文回传给管理端。
+func isSensitiveKey(key string) bool {
+	if meta, ok := confKeys[key]; ok && meta.sensitive {
+		return true
+	}
+	k := strings.ToLower(key)
+	if strings.HasSuffix(k, "_file") || strings.HasSuffix(k, "_path") {
+		return false
+	}
+	return strings.Contains(k, "password") ||
+		strings.Contains(k, "secret") ||
+		strings.Contains(k, "token") ||
+		strings.Contains(k, "vkey") ||
+		strings.HasSuffix(k, "_key")
 }
 
 func validateValue(key, val string, meta confKeyMeta) error {

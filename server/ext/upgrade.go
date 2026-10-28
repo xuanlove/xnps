@@ -1,6 +1,7 @@
 package ext
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
@@ -9,13 +10,16 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
 
+	"github.com/astaxie/beego"
 	"github.com/astaxie/beego/logs"
 )
 
@@ -148,10 +152,88 @@ func Upgrade(req *UpgradeRequest) (map[string]interface{}, error) {
 	return res, nil
 }
 
-// downloadToFile 流式下载到本地文件并返回 sha256（AUDIT P1-5）
-func downloadToFile(url, path string) (string, error) {
-	client := &http.Client{Timeout: 10 * time.Minute}
-	resp, err := client.Get(url)
+// downloadToFile 流式下载到本地文件并返回 sha256（AUDIT P1-5）。
+// 安全约束（AUDIT H3）：仅允许 https、禁止重定向；默认拒绝内网/回环地址，
+// 若配置 upgrade_allowed_hosts（逗号分隔）则只允许名单内主机（可用于内网制品库）。
+func downloadToFile(rawURL, path string) (string, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", err
+	}
+	if !strings.EqualFold(u.Scheme, "https") {
+		return "", errors.New("upgrade url must use https")
+	}
+	allowPrivate, err := upgradeHostPolicy(u.Hostname())
+	if err != nil {
+		return "", err
+	}
+
+	client := &http.Client{
+		Timeout: 10 * time.Minute,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+		Transport: &http.Transport{
+			// 不使用环境代理：制品下载必须直连并经过内网地址检查
+			TLSHandshakeTimeout:   15 * time.Second,
+			ResponseHeaderTimeout: 60 * time.Second,
+			DialContext:           safeDialContext(allowPrivate),
+		},
+	}
+
+	return downloadToFileWithClient(client, u.String(), path)
+}
+
+// upgradeHostPolicy 返回是否允许内网地址（仅当显式 allowlist 命中时为 true）
+func upgradeHostPolicy(host string) (allowPrivate bool, err error) {
+	raw := strings.TrimSpace(beego.AppConfig.String("upgrade_allowed_hosts"))
+	if raw == "" {
+		return false, nil
+	}
+	for _, item := range strings.Split(raw, ",") {
+		if strings.EqualFold(strings.TrimSpace(item), host) {
+			return true, nil
+		}
+	}
+	return false, fmt.Errorf("upgrade host %s is not in upgrade_allowed_hosts", host)
+}
+
+func safeDialContext(allowPrivate bool) func(ctx context.Context, network, addr string) (net.Conn, error) {
+	return func(ctx context.Context, network, addr string) (net.Conn, error) {
+		host, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			return nil, err
+		}
+		ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+		if err != nil {
+			return nil, err
+		}
+		dialer := &net.Dialer{Timeout: 30 * time.Second}
+		var lastErr error
+		for _, ip := range ips {
+			if !allowPrivate && isBlockedIP(ip.IP) {
+				continue
+			}
+			conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(ip.IP.String(), port))
+			if err == nil {
+				return conn, nil
+			}
+			lastErr = err
+		}
+		if lastErr != nil {
+			return nil, lastErr
+		}
+		return nil, fmt.Errorf("upgrade host %s resolves only to blocked addresses", host)
+	}
+}
+
+func isBlockedIP(ip net.IP) bool {
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsUnspecified() ||
+		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsMulticast()
+}
+
+func downloadToFileWithClient(client *http.Client, rawURL, path string) (string, error) {
+	resp, err := client.Get(rawURL)
 	if err != nil {
 		return "", err
 	}

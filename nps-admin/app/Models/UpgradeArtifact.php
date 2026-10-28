@@ -15,10 +15,12 @@ class UpgradeArtifact extends Model
     protected $fillable = [
         'version', 'channel', 'sha256', 'filename',
         'size_bytes', 'compatible_core_version', 'notes', 'download_token',
+        'download_token_expires_at',
     ];
 
     protected $casts = [
         'size_bytes' => 'integer',
+        'download_token_expires_at' => 'datetime',
     ];
 
     protected $hidden = ['download_token'];
