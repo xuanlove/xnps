@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 
+	"ehang.io/nps/lib/changelog"
 	"ehang.io/nps/lib/common"
 	"ehang.io/nps/lib/crypt"
 	"ehang.io/nps/lib/rate"
@@ -106,18 +107,21 @@ func (s *DbUtils) NewTask(t *Tunnel) (err error) {
 	t.Flow = new(Flow)
 	s.JsonDb.Tasks.Store(t.Id, t)
 	s.JsonDb.StoreTasksToJsonFile()
+	changelog.Append("add", "task", t.Id)
 	return
 }
 
 func (s *DbUtils) UpdateTask(t *Tunnel) error {
 	s.JsonDb.Tasks.Store(t.Id, t)
 	s.JsonDb.StoreTasksToJsonFile()
+	changelog.Append("update", "task", t.Id)
 	return nil
 }
 
 func (s *DbUtils) DelTask(id int) error {
 	s.JsonDb.Tasks.Delete(id)
 	s.JsonDb.StoreTasksToJsonFile()
+	changelog.Append("del", "task", id)
 	return nil
 }
 
@@ -145,6 +149,7 @@ func (s *DbUtils) GetTask(id int) (t *Tunnel, err error) {
 func (s *DbUtils) DelHost(id int) error {
 	s.JsonDb.Hosts.Delete(id)
 	s.JsonDb.StoreHostToJsonFile()
+	changelog.Append("del", "host", id)
 	return nil
 }
 
@@ -171,6 +176,7 @@ func (s *DbUtils) NewHost(t *Host) error {
 	t.Flow = new(Flow)
 	s.JsonDb.Hosts.Store(t.Id, t)
 	s.JsonDb.StoreHostToJsonFile()
+	changelog.Append("add", "host", t.Id)
 	return nil
 }
 
@@ -200,6 +206,7 @@ func (s *DbUtils) GetHost(start, length int, id int, search string) ([]*Host, in
 func (s *DbUtils) DelClient(id int) error {
 	s.JsonDb.Clients.Delete(id)
 	s.JsonDb.StoreClientsToJsonFile()
+	changelog.Append("del", "client", id)
 	return nil
 }
 
@@ -233,6 +240,7 @@ reset:
 	}
 	s.JsonDb.Clients.Store(c.Id, c)
 	s.JsonDb.StoreClientsToJsonFile()
+	changelog.Append("add", "client", c.Id)
 	return nil
 }
 
@@ -264,6 +272,7 @@ func (s *DbUtils) VerifyUserName(username string, id int) (res bool) {
 
 func (s *DbUtils) UpdateClient(t *Client) error {
 	s.JsonDb.Clients.Store(t.Id, t)
+	changelog.Append("update", "client", t.Id)
 	if t.RateLimit == 0 {
 		t.Rate = rate.NewRate(int64(2 << 23))
 		t.Rate.Start()

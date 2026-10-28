@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"ehang.io/nps/lib/changelog"
 	"ehang.io/nps/lib/common"
 	"ehang.io/nps/lib/file"
 	"ehang.io/nps/lib/rate"
@@ -157,6 +158,7 @@ func (s *ClientController) ChangeStatus() {
 		if client.Status == false {
 			server.DelClientConnect(client.Id)
 		}
+		changelog.Append("update", "client", client.Id)
 		s.AjaxOk("modified success")
 	}
 	s.AjaxErr("modified fail")

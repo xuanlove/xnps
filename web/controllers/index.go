@@ -1,6 +1,7 @@
 package controllers
 
 import (
+	"ehang.io/nps/lib/changelog"
 	"ehang.io/nps/lib/file"
 	"ehang.io/nps/server"
 	"ehang.io/nps/server/tool"
@@ -313,6 +314,7 @@ func (s *IndexController) EditHost() {
 			h.CertFilePath = s.getEscapeString("cert_file_path")
 			h.Target.LocalProxy = s.GetBoolNoErr("local_proxy")
 			file.GetDb().JsonDb.StoreHostToJsonFile()
+			changelog.Append("update", "host", id)
 		}
 		s.AjaxOk("modified success")
 	}

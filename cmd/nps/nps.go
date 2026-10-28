@@ -21,6 +21,7 @@ import (
 	"ehang.io/nps/lib/common"
 	"ehang.io/nps/lib/crypt"
 	"ehang.io/nps/lib/daemon"
+	"ehang.io/nps/server/ext"
 	"github.com/astaxie/beego"
 	"github.com/astaxie/beego/logs"
 
@@ -159,6 +160,7 @@ type nps struct {
 }
 
 func (p *nps) Start(s service.Service) error {
+	ext.SetServiceInstance(s) // nps-admin-ext: 注入系统服务实例，供 /ext/restart 使用
 	_, _ = s.Status()
 	go p.run()
 	return nil
