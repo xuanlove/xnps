@@ -268,7 +268,11 @@ class NpsApiClient
         }
 
         $this->audit($method, $path, $params, $json, $result, microtime(true) - $start);
-        $this->server->forceFill(['is_reachable' => $result->ok || $result->statusCode !== null])->saveQuietly();
+        $reachable = $result->ok || $result->statusCode !== null;
+        // 仅在可达性变化时落库（AUDIT P2-4），避免每个 API 调用都产生写放大
+        if ((bool) $this->server->is_reachable !== $reachable) {
+            $this->server->forceFill(['is_reachable' => $reachable])->saveQuietly();
+        }
 
         return $result;
     }

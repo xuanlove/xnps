@@ -142,38 +142,37 @@ class SyncEngine
         $api = $this->clientFactory->for($server);
         $resp = $api->extOnline()->orFail('ext/online');
         $data = (array) $resp->data;
-        $onlineIds = array_map('intval', (array) ($data['online'] ?? []));
+        $onlineIds = array_values(array_unique(array_map('intval', (array) ($data['online'] ?? []))));
         $onlineSet = array_flip($onlineIds);
 
-        // 与本地镜像 diff，只更新发生变化的行（避免全表写）
-        $changed = 0;
-        NpsClient::where('server_id', $server->id)->select('id', 'remote_id', 'is_connect')
-            ->chunkById(5000, function ($rows) use ($onlineSet, &$changed) {
-                $flip = [];
-                foreach ($rows as $row) {
-                    $flip[(int) $row->remote_id] = $row;
-                }
-                $toOnline = [];
-                $toOffline = [];
-                foreach ($flip as $remoteId => $row) {
-                    $shouldBe = isset($onlineSet[$remoteId]);
-                    if ($shouldBe && ! $row->is_connect) {
-                        $toOnline[] = $row->id;
-                    } elseif (! $shouldBe && $row->is_connect) {
-                        $toOffline[] = $row->id;
-                    }
-                }
-                if ($toOnline) {
-                    NpsClient::whereIn('id', $toOnline)->update(['is_connect' => true]);
-                    $changed += count($toOnline);
-                }
-                if ($toOffline) {
-                    NpsClient::whereIn('id', $toOffline)->update(['is_connect' => false]);
-                    $changed += count($toOffline);
-                }
-            });
+        // 只对比“本地在线集合”与“远端在线集合”（AUDIT P2-2），
+        // 避免每 30s 全量扫描该服务器的所有 client 镜像。
+        $localOnline = NpsClient::where('server_id', $server->id)
+            ->where('is_connect', true)
+            ->pluck('remote_id')
+            ->map(fn ($id) => (int) $id)
+            ->all();
 
-        return sprintf('online=%d changed=%d', count($onlineIds), $changed);
+        $toOnline = array_values(array_diff($onlineIds, $localOnline));
+        $toOffline = array_values(array_diff($localOnline, $onlineIds));
+
+        $changed = 0;
+        foreach (array_chunk($toOnline, 5000) as $chunk) {
+            if (! empty($chunk)) {
+                $changed += NpsClient::where('server_id', $server->id)
+                    ->whereIn('remote_id', $chunk)
+                    ->update(['is_connect' => true]);
+            }
+        }
+        foreach (array_chunk($toOffline, 5000) as $chunk) {
+            if (! empty($chunk)) {
+                $changed += NpsClient::where('server_id', $server->id)
+                    ->whereIn('remote_id', $chunk)
+                    ->update(['is_connect' => false]);
+            }
+        }
+
+        return sprintf('online=%d changed=%d', count($onlineSet), $changed);
     }
 
     public function syncFlow(NpsServer $server, int $shard, int $total): string
@@ -184,15 +183,8 @@ class SyncEngine
         $flows = (array) ($data['flows'] ?? []);
 
         $updated = 0;
-        foreach (array_chunk($flows, 500) as $batch) {
-            foreach ($batch as $flow) {
-                $updated += NpsClient::where('server_id', $server->id)
-                    ->where('remote_id', (int) $flow['client_id'])
-                    ->update([
-                        'flow_in' => (int) $flow['in'],
-                        'flow_out' => (int) $flow['out'],
-                    ]);
-            }
+        foreach (array_chunk($flows, 200) as $batch) {
+            $updated += $this->bulkUpdateFlows($server->id, $batch);
         }
 
         // P2 计费链路（DESIGN.md §8.3）：增量累加月度用量 + 超额执行
@@ -274,8 +266,15 @@ class SyncEngine
             $cursor = (int) ($data['next_cursor'] ?? 0);
         } while ($cursor > 0 && count($seenIds) < $total);
 
-        // 删除本地失配行（远端已不存在）
-        if (! empty($seenIds)) {
+        // 删除本地失配行（远端已不存在）。
+        // 远端为空时也必须清理（AUDIT P2-6），但保留配置开关防误删。
+        if ($total === 0) {
+            if (config('nps.reconcile_delete_on_empty', true)) {
+                $this->deleteAll($server->id, $type);
+            } else {
+                Log::warning("nps reconcile: remote {$type} is empty, skip local purge (guard disabled)");
+            }
+        } elseif (! empty($seenIds)) {
             $this->deleteMissing($server->id, $type, $seenIds);
         }
     }
@@ -425,6 +424,55 @@ class SyncEngine
         );
     }
 
+    /**
+     * 批量更新一片流量的 flow_in/flow_out（AUDIT P2-1）：
+     * 每 200 行一条 CASE 更新，避免逐 client 两次查询。
+     */
+    private function bulkUpdateFlows(int $serverId, array $flows): int
+    {
+        $rows = [];
+        foreach ($flows as $flow) {
+            $remoteId = (int) ($flow['client_id'] ?? 0);
+            if ($remoteId <= 0) {
+                continue;
+            }
+            $rows[] = [
+                'id' => $remoteId,
+                'in' => (int) ($flow['in'] ?? 0),
+                'out' => (int) ($flow['out'] ?? 0),
+            ];
+        }
+        if (empty($rows)) {
+            return 0;
+        }
+
+        $ids = array_column($rows, 'id');
+        $inCase = [];
+        $outCase = [];
+        $bindings = [];
+        foreach ($rows as $row) {
+            $inCase[] = 'WHEN ? THEN ?';
+            $bindings[] = $row['id'];
+            $bindings[] = $row['in'];
+        }
+        foreach ($rows as $row) {
+            $outCase[] = 'WHEN ? THEN ?';
+            $bindings[] = $row['id'];
+            $bindings[] = $row['out'];
+        }
+        $bindings[] = $serverId;
+        foreach ($ids as $id) {
+            $bindings[] = $id;
+        }
+
+        $sql = 'UPDATE nps_clients SET '
+            .'flow_in = CASE remote_id '.implode(' ', $inCase).' ELSE flow_in END, '
+            .'flow_out = CASE remote_id '.implode(' ', $outCase).' ELSE flow_out END '
+            .'WHERE server_id = ? AND remote_id IN ('.implode(',', array_fill(0, count($ids), '?')).')';
+
+        return DB::update($sql, $bindings);
+    }
+
     private function deleteByRemoteIds(int $serverId, string $type, array $remoteIds): void
     {
         $ids = array_map('intval', $remoteIds);
@@ -434,6 +482,19 @@ class SyncEngine
             'host' => NpsHost::where('server_id', $serverId)->whereIn('remote_id', $ids)->delete(),
             default => Log::warning("nps sync: unknown delete type {$type}, skipped"),
         };
+    }
+
+    private function deleteAll(int $serverId, string $type): void
+    {
+        $model = match ($type) {
+            'client' => NpsClient::class,
+            'tunnel' => NpsTunnel::class,
+            'host' => NpsHost::class,
+            default => null,
+        };
+        if ($model) {
+            $model::where('server_id', $serverId)->delete();
+        }
     }
 
     /**
