@@ -7,3 +7,4 @@ nps-admin/node_modules/
 nps-admin/storage/logs/
 nps-admin/database/database.sqlite
 nps-admin/.env
+.screenshots/
