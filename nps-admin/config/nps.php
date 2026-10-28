@@ -78,4 +78,44 @@ return [
 
     // 月度结算日（每月 1 号 00:05 由 scheduler 触发）
     'settle_day' => '1',
+
+    // ---- 证书子系统（DESIGN.md §7，阶段 3）----
+
+    'cert' => [
+        // 到期前 N 天进入续期窗口（告警 + 自动续触发）
+        'renew_days' => 30,
+    ],
+
+    // ACME 来源（生产启用：mode=certd 走 certd 签发流水线；空=仅人工上传）
+    'acme' => [
+        'mode' => env('NPS_ACME_MODE', ''),
+        'certd_url' => env('NPS_ACME_CERTD_URL', ''),
+        'certd_token' => env('NPS_ACME_CERTD_TOKEN', ''),
+    ],
+
+    // certd 部署通道（空=未配置，自动回退 native 直推）
+    'certd' => [
+        'deploy_trigger_url' => env('NPS_CERTD_DEPLOY_URL', ''),
+        'token' => env('NPS_CERTD_TOKEN', ''),
+    ],
+
+    // ---- 监控告警（阶段 3）----
+
+    'monitor' => [
+        // /ext/system 采集间隔（秒，CollectMetricsJob 自循环）
+        'interval' => 30,
+
+        // 指标保留天数
+        'metrics_retention_days' => 7,
+
+        // 告警阈值
+        'alerts' => [
+            'cpu_percent' => 90,
+            'mem_percent' => 90,
+            'sync_lag_minutes' => 5,
+        ],
+
+        // 可选 webhook 通知（空=仅落库+日志）
+        'webhook_url' => env('NPS_ALERT_WEBHOOK_URL', ''),
+    ],
 ];

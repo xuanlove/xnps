@@ -1,6 +1,8 @@
 <?php
 
 use App\Http\Controllers\Admin\AdminController;
+use App\Http\Controllers\Admin\CertificateController;
+use App\Http\Controllers\Admin\MonitorController;
 use App\Http\Controllers\ClientController;
 use App\Http\Controllers\HostController;
 use App\Http\Controllers\Portal\AuthController;
@@ -42,6 +44,19 @@ Route::prefix('admin')
         Route::get('/users', [AdminController::class, 'users']);
         Route::post('/users/{user}/recharge', [AdminController::class, 'recharge']);
         Route::post('/settle', [AdminController::class, 'settle']);
+
+        // 证书子系统（DESIGN.md §7，阶段 3）
+        Route::get('/certificates', [CertificateController::class, 'index']);
+        Route::post('/certificates', [CertificateController::class, 'store']);
+        Route::post('/certificates/{certificate}/deploy/{server}', [CertificateController::class, 'deploy']);
+        Route::post('/certificates/{certificate}/enable-https/{server}', [CertificateController::class, 'enableHttps']);
+        Route::post('/certificates/{certificate}/rotate/{server}', [CertificateController::class, 'rotate']);
+        Route::post('/certificates/verify/{server}', [CertificateController::class, 'verify']);
+
+        // 监控与告警（阶段 3）
+        Route::get('/monitor/{server}/metrics', [MonitorController::class, 'metrics']);
+        Route::get('/monitor/alerts', [MonitorController::class, 'alerts']);
+        Route::post('/monitor/check', [MonitorController::class, 'check']);
     });
 
 // ---- nps 集中管理 API（阶段 1：管理面，生产应叠加 admin 中间件）----

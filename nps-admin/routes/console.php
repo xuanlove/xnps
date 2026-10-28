@@ -43,3 +43,27 @@ Schedule::call(function () {
 Schedule::call(function () {
     app(\App\Services\Portal\BillingService::class)->settleAll();
 })->monthlyOn(1, '00:05')->name('monthly-settlement');
+
+// ---- 证书与监控（DESIGN.md §7 / 阶段 3）----
+
+// 监控采集种子（CollectMetricsJob 自循环 30s，此处防断裂）
+Schedule::call(function () {
+    NpsServer::where('status', 'active')->each(function (NpsServer $server) {
+        \App\Jobs\CollectMetricsJob::dispatch($server->id)->onQueue('nps-sync');
+    });
+})->everyTenMinutes()->name('metrics-seeds');
+
+// 告警检查：阈值 / 不可达 / 证书到期 / 同步延迟 / 隧道异常
+Schedule::call(function () {
+    app(\App\Services\Monitor\MonitoringService::class)->checkAll();
+})->everyFiveMinutes()->name('alert-check');
+
+// 证书指纹全平台对账（DESIGN.md §7.2 双 SoT 防护）
+Schedule::call(function () {
+    app(\App\Services\Cert\CertificateService::class)->reconcileAll();
+})->dailyAt('03:00')->name('cert-reconcile');
+
+// 监控采样清理（保留天数）
+Schedule::call(function () {
+    app(\App\Services\Monitor\MonitoringService::class)->pruneMetrics();
+})->daily()->name('metrics-prune');

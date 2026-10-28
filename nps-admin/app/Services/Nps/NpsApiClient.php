@@ -173,8 +173,9 @@ class NpsApiClient
         $params = $this->signParams($params);
 
         $attempt = function () use ($method, $path, $params, $json) {
+            // TLS 校验按服务器配置（自签证书场景 false，CA 签发 true）
             $req = Http::timeout(config('nps.http_timeout'))
-                ->withOptions(['verify' => true]);
+                ->withOptions(['verify' => (bool) ($this->server->tls_verify ?? true)]);
 
             if ($json !== null) {
                 $req = $req->asJson();
@@ -259,6 +260,7 @@ class NpsApiClient
         $offset = 0;
         try {
             $resp = Http::timeout(config('nps.http_timeout'))
+                ->withOptions(['verify' => (bool) ($this->server->tls_verify ?? true)])
                 ->post(rtrim($this->server->api_url, '/').'/auth/gettime');
             $body = $resp->json();
             if (isset($body['time']) && is_numeric($body['time'])) {
