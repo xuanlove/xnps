@@ -25,6 +25,9 @@ return [
     // /ext/list 对账分页大小
     'reconcile_page_size' => 500,
 
+    // 远端为空时是否清空本地镜像（保护开关，防 API 异常返回空导致误删）
+    'reconcile_delete_on_empty' => true,
+
     // 镜像批量 upsert 每批行数
     'upsert_chunk' => 1000,
 

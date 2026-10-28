@@ -2,6 +2,7 @@
 
 namespace App\Services\Cert;
 
+use App\Models\Alert;
 use App\Models\Certificate;
 use App\Models\CertificateDeployment;
 use App\Models\NpsServer;
@@ -234,5 +235,124 @@ class CertificateService
         return Certificate::where('active', true)
             ->where('not_after', '<=', $deadline)
             ->get()->all();
+    }
+
+    // ------------------------------------------------------------------
+    // 自动续期（P1-2）
+    // ------------------------------------------------------------------
+
+    /**
+     * 续期所有即将到期的 ACME 证书，并滚动部署到原有目标服务器。
+     * manual 来源不自动续签（由 MonitoringService 告警，人工上传）。
+     *
+     * @return array{renewed: int, deployed: int, failed: int, skipped: int}
+     */
+    public function renewExpiring(): array
+    {
+        $stats = ['renewed' => 0, 'deployed' => 0, 'failed' => 0, 'skipped' => 0];
+
+        foreach ($this->expiringSoon() as $cert) {
+            if (! in_array($cert->source, ['acme', 'acme-builtin'], true)) {
+                $stats['skipped']++; // manual：仅告警
+                continue;
+            }
+            if ($this->hasNewerCertificate($cert)) {
+                $stats['skipped']++;
+                continue;
+            }
+
+            $mode = $cert->source === 'acme-builtin' ? 'builtin' : 'certd';
+            $server = $this->renewalServer($cert, $mode);
+
+            try {
+                $new = $this->issueAcme((array) $cert->domains, $server, $mode);
+                $stats['renewed']++;
+                $cert->update(['active' => false]);
+                Log::info("certificate renewed: #{$cert->id} -> #{$new->id} ({$mode})");
+            } catch (\Throwable $e) {
+                $stats['failed']++;
+                $this->raiseRenewAlert($server, $cert, 'certificate renew failed: '.$e->getMessage(), ['error' => $e->getMessage()]);
+                Log::error("certificate renew failed #{$cert->id}: {$e->getMessage()}");
+                continue;
+            }
+
+            // 按原部署记录滚动替换（autoRestart=true 使新证书生效）
+            $deployments = CertificateDeployment::where('certificate_id', $cert->id)->with('server')->get();
+            foreach ($deployments as $deployment) {
+                $target = $deployment->server;
+                if (! $target || ! $target->isActive()) {
+                    $stats['skipped']++;
+                    continue;
+                }
+                try {
+                    $this->deploy($target, $new, $deployment->channel ?: 'native', true);
+                    $stats['deployed']++;
+                } catch (\Throwable $e) {
+                    $stats['failed']++;
+                    $this->raiseRenewAlert($target, $new, 'certificate redeploy failed: '.$e->getMessage(), [
+                        'error' => $e->getMessage(),
+                        'channel' => $deployment->channel,
+                    ]);
+                    Log::error("certificate redeploy failed #{$new->id} on server {$target->id}: {$e->getMessage()}");
+                }
+            }
+        }
+
+        return $stats;
+    }
+
+    private function hasNewerCertificate(Certificate $cert): bool
+    {
+        $candidates = Certificate::where('active', true)
+            ->where('id', '!=', $cert->id)
+            ->where('not_after', '>', $cert->not_after)
+            ->get();
+
+        foreach ($candidates as $candidate) {
+            if ($this->sameDomains((array) $candidate->domains, (array) $cert->domains)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private function sameDomains(array $a, array $b): bool
+    {
+        $a = array_values(array_unique(array_map(fn ($d) => strtolower((string) $d), $a)));
+        $b = array_values(array_unique(array_map(fn ($d) => strtolower((string) $d), $b)));
+        sort($a);
+        sort($b);
+
+        return $a === $b;
+    }
+
+    private function renewalServer(Certificate $cert, string $mode): ?NpsServer
+    {
+        if ($mode !== 'builtin') {
+            return null; // certd 由 DNS-01 完成，不依赖某台 nps
+        }
+        $deployment = CertificateDeployment::where('certificate_id', $cert->id)
+            ->with('server')->first();
+        if ($deployment && $deployment->server && $deployment->server->isActive()) {
+            return $deployment->server;
+        }
+
+        return NpsServer::where('status', 'active')->orderBy('id')->first();
+    }
+
+    private function raiseRenewAlert(?NpsServer $server, Certificate $cert, string $message, array $context = []): void
+    {
+        Alert::create([
+            'server_id' => $server?->id,
+            'type' => 'cert_renew_failed',
+            'level' => 'critical',
+            'message' => $message,
+            'context' => $context + [
+                'certificate_id' => $cert->id,
+                'domains' => $cert->domains,
+            ],
+            'created_at' => now(),
+        ]);
     }
 }

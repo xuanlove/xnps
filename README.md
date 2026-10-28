@@ -130,7 +130,7 @@ WECHAT_PAY_NOTIFY_URL=https://<管理端>/api/payments/wechat/notify
   - 不支持通配符；挑战由 nps HTTP 监听器的 `/.well-known/acme-challenge/` 应答；
   - 证书私钥在 nps 侧生成后回传管理端入库（私钥加密存储），部署仍走 `/ext/cert` 唯一入口；
   - `NPS_ACME_DIRECTORY_URL` 仅允许 Let's Encrypt 生产/测试目录（防 SSRF），首次建议先用 staging。
-- 管理端「证书」页可签发、部署、启用 HTTPS（防自锁顺序）、轮换与全平台指纹对账。
+- 管理端「证书」页可签发、部署、启用 HTTPS（防自锁顺序）、轮换与全平台指纹对账；ACME 证书到期前 30 天自动续期并逐台滚动部署（manual 证书仅告警）。
 
 ## 构建与打包
 

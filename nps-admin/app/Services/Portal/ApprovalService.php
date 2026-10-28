@@ -55,16 +55,20 @@ class ApprovalService
      */
     public function approve(Approval $approval, ?User $approver): void
     {
-        if ($approval->status !== Approval::STATUS_SUBMITTED) {
+        // 条件更新（AUDIT L9）：double-approve 并发时仅一个请求能成功
+        $updated = Approval::whereKey($approval->id)
+            ->where('status', Approval::STATUS_SUBMITTED)
+            ->update([
+                'status' => Approval::STATUS_APPROVED,
+                'approver_id' => $approver?->id,
+                'reviewed_at' => now(),
+            ]);
+
+        if ($updated === 0) {
             throw new \DomainException("approval {$approval->id} is not in submitted state");
         }
 
-        $approval->update([
-            'status' => Approval::STATUS_APPROVED,
-            'approver_id' => $approver?->id,
-            'reviewed_at' => now(),
-        ]);
-
+        $approval->refresh();
         ProvisionApprovalJob::dispatch($approval->id)->onQueue('nps-provision');
     }
 
@@ -73,16 +77,20 @@ class ApprovalService
      */
     public function reject(Approval $approval, User $approver, string $reason): void
     {
-        if ($approval->status !== Approval::STATUS_SUBMITTED) {
+        $updated = Approval::whereKey($approval->id)
+            ->where('status', Approval::STATUS_SUBMITTED)
+            ->update([
+                'status' => Approval::STATUS_REJECTED,
+                'approver_id' => $approver->id,
+                'reviewed_at' => now(),
+                'reject_reason' => $reason,
+            ]);
+
+        if ($updated === 0) {
             throw new \DomainException("approval {$approval->id} is not in submitted state");
         }
 
-        $approval->update([
-            'status' => Approval::STATUS_REJECTED,
-            'approver_id' => $approver->id,
-            'reviewed_at' => now(),
-            'reject_reason' => $reason,
-        ]);
+        $approval->refresh();
     }
 
     /**

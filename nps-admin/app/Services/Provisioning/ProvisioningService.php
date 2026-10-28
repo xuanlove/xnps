@@ -219,7 +219,18 @@ class ProvisioningService
             }
         };
 
+        // 已分配端口一次性查出（AUDIT P2-3），避免逐端口 INSERT 试探
+        $used = array_flip(
+            PortAllocation::where('server_id', $server->id)
+                ->pluck('port')
+                ->map(fn ($p) => (int) $p)
+                ->all()
+        );
+
         if ($preferred !== null) {
+            if (isset($used[$preferred])) {
+                throw new ProvisioningException("port {$preferred} is already allocated on server {$server->name}");
+            }
             $held = $tryHold($preferred);
             if ($held !== null) {
                 return $held;
@@ -230,19 +241,26 @@ class ProvisioningService
         // 自动分配：默认区间 10000-65535（生产应按 nps.conf allow_ports 配置）
         $reserved = array_flip($reservedPorts);
         $ranges = ! empty($allowRanges) ? $allowRanges : [[10000, 65535]];
+        $candidates = [];
         foreach ($ranges as [$min, $max]) {
-            // 随机起点降低连续冲突概率
-            $span = $max - $min + 1;
-            $start = $min + random_int(0, max(0, $span - 1));
-            for ($i = 0; $i < $span; $i++) {
-                $port = $min + (($start - $min + $i) % $span);
-                if (isset($reserved[$port])) {
-                    continue; // nps 自身监听端口，跳过
+            for ($port = $min; $port <= $max; $port++) {
+                if (isset($used[$port]) || isset($reserved[$port])) {
+                    continue; // 已占用或 nps 自身监听端口
                 }
-                $held = $tryHold($port);
-                if ($held !== null) {
-                    return $held;
-                }
+                $candidates[] = $port;
+            }
+        }
+        if (empty($candidates)) {
+            throw new ProvisioningException("no available port on server {$server->name}");
+        }
+
+        // 随机起点，遇到并发抢占（唯一约束冲突）继续尝试下一个候选
+        $span = count($candidates);
+        $start = random_int(0, max(0, $span - 1));
+        for ($i = 0; $i < $span; $i++) {
+            $held = $tryHold($candidates[($start + $i) % $span]);
+            if ($held !== null) {
+                return $held;
             }
         }
 

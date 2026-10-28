@@ -24,7 +24,7 @@ class ScheduleTest extends TestCase
         $output = Artisan::output();
 
         $this->assertSame(0, $exitCode);
-        foreach (['nps-sync-version', 'nps-sync-online', 'nps-sync-flow', 'nps-metrics'] as $event) {
+        foreach (['nps-sync-version', 'nps-sync-online', 'nps-sync-flow', 'nps-metrics', 'cert-renew'] as $event) {
             $this->assertStringContainsString($event, $output);
         }
         $this->assertStringNotContainsString('nps-sync-seeds', $output);

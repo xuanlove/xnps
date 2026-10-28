@@ -55,21 +55,21 @@ class BillingService
     {
         $period = self::currentPeriod();
 
-        foreach ($flows as $flow) {
-            $client = NpsClient::where('server_id', $serverId)
-                ->where('remote_id', (int) ($flow['client_id'] ?? 0))
-                ->whereNotNull('user_id')
-                ->first();
-            if (! $client) {
-                continue; // 无归属的 client 不计费
-            }
+        // 单事务处理整片采样（AUDIT P2-1）：减少 N 次事务提交；
+        // 行锁仍按 client 基线加锁，保证 delta 计算与快照回写原子。
+        DB::transaction(function () use ($serverId, $flows, $period) {
+            foreach ($flows as $flow) {
+                $client = NpsClient::where('server_id', $serverId)
+                    ->where('remote_id', (int) ($flow['client_id'] ?? 0))
+                    ->whereNotNull('user_id')
+                    ->first();
+                if (! $client) {
+                    continue; // 无归属的 client 不计费
+                }
 
-            $currentIn = (int) ($flow['in'] ?? 0);
-            $currentOut = (int) ($flow['out'] ?? 0);
+                $currentIn = (int) ($flow['in'] ?? 0);
+                $currentOut = (int) ($flow['out'] ?? 0);
 
-            // 基线读-改-写整体加行锁（AUDIT M2）：自循环与调度种子重叠时，
-            // 并发采样会丢失快照回写导致 delta 重复累加（重复计费）
-            DB::transaction(function () use ($client, $period, $currentIn, $currentOut) {
                 $baseline = FlowBaseline::where('client_id', $client->id)
                     ->where('period', $period)
                     ->lockForUpdate()->first();
@@ -83,7 +83,7 @@ class BillingService
                         'last_out' => $currentOut,
                     ]);
 
-                    return;
+                    continue;
                 }
 
                 $deltaIn = max(0, $currentIn - $baseline->last_in);
@@ -106,8 +106,8 @@ class BillingService
                 }
 
                 $baseline->update(['last_in' => $currentIn, 'last_out' => $currentOut]);
-            });
-        }
+            }
+        });
     }
 
     /**

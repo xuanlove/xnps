@@ -1,6 +1,6 @@
 # xnps 迭代方案（基于全量只读代码复核）
 
-> **实施状态（2026-10-28）**：已交付管理控制台（Vue SPA，10 页）、支付宝/微信支付（含 mock 与回调验签）、certd + 内置 ACME 双证书来源；**I0 已完成**：P0-1（调度增殖）改为节拍派发 + `ShouldBeUnique`，P0-2（升级 Run 重复）、P0-3（版本签名口径）、P1-1（写操作重试）均已修复。支付退款/对账报表仍待办。
+> **实施状态（2026-10-28）**：已交付管理控制台（Vue SPA，10 页）、支付宝/微信支付（含 mock 与回调验签）、certd + 内置 ACME 双证书来源；**I0 已完成**：P0-1（调度增殖）改为节拍派发 + `ShouldBeUnique`，P0-2（升级 Run 重复）、P0-3（版本签名口径）、P1-1（写操作重试）均已修复。**I1 已完成**：P1-2 证书自动续期、P1-5 升级流式下载与架构校验、P2-1/P2-2 流量与在线批量化、P2-3 端口池候选查询、P2-4 可达性写节流、P2-6 对账空集清理、L9 审批条件更新。支付退款/对账报表仍待办。
 
 - 复核基线：`master` @ `2e5b832`（含 ext 0.2.0 与全部审计修复）
 - 方式：**只读**通读 Go 内核（`cmd/`、`server/ext/`、`lib/changelog/`、`web/controllers/`）与 Laravel 管理端（Services / Jobs / Controllers / Models / Policies / migrations / routes / config / CI），未修改任何代码

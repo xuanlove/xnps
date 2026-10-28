@@ -2,6 +2,7 @@
 
 use App\Jobs\CollectMetricsJob;
 use App\Jobs\ReconcileServerJob;
+use App\Jobs\RenewCertificatesJob;
 use App\Jobs\SyncFlowJob;
 use App\Jobs\SyncOnlineJob;
 use App\Jobs\SyncVersionJob;
@@ -80,6 +81,11 @@ Schedule::call(function () {
 Schedule::call(function () {
     app(\App\Services\Cert\CertificateService::class)->reconcileAll();
 })->dailyAt('03:00')->name('cert-reconcile');
+
+// 证书自动续期：到期前 30 天内由 ACME 重新签发并滚动部署
+Schedule::job(new RenewCertificatesJob(), 'nps-sync')
+    ->dailyAt('04:00')
+    ->name('cert-renew');
 
 // 监控采样清理（保留天数）
 Schedule::call(function () {

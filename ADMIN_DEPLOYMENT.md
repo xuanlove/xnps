@@ -368,6 +368,7 @@ request_terminate_timeout = 600s
 | 每小时 | 审批过期扫描 |
 | 每 6 小时 | 全量对账 |
 | 每日 03:00 | 证书指纹对账 |
+| 每日 04:00 | ACME 证书自动续期（到期前 30 天） |
 | 每日 | 审计日志清理、指标清理 |
 | 每月 1 日 00:05 | 月度结算 |
 
@@ -448,6 +449,7 @@ NPS_CERTD_TOKEN=
 
 - **builtin**：nps 侧 HTTP-01 签发；不支持通配符；要求域名解析到该 nps 且 80 端口可达；首次务必先用 staging 目录验证。
 - **certd**：DNS-01，支持通配符；签发与部署可走 certd，未配置部署地址时回退 native 直推 `/ext/cert`。
+- **自动续期**：每日 04:00 扫描 `not_after <= 30 天` 的 ACME 证书（`acme` / `acme-builtin` 来源），重新签发并按原部署记录逐台滚动替换（`autoRestart=true`，每台 nps 会重启一次）。manual 证书不自动续签，只由监控告警提示人工上传。
 - 启用 HTTPS 顺序由控制台编排：推证书（不重启）→ 写 `web_open_ssl=true` → 重启 → HTTPS 探活 → 切换 `api_url`。不要手工先开 SSL。
 - **自锁恢复**：若启用失败导致 WebAPI 不可达，登录 nps 主机把 `conf/nps.conf` 的 `web_open_ssl` 改回 `false` 并重启 nps，再从控制台重试。
 - ACME 账户密钥保存在 nps `conf/acme_account.key`（0600），请纳入备份。
