@@ -117,7 +117,9 @@ class ProvisioningService
         $heldPort = null;
         if ($needsPort) {
             $port = $params['port'] ?? null;
-            $heldPort = $this->holdPort($server, $port);
+            // 自动分配时排除 nps 自身监听端口（AUDIT M4）
+            $reserved = $port === null ? $this->reservedPorts($server) : [];
+            $heldPort = $this->holdPort($server, $port, [], $reserved);
             $params['port'] = $heldPort;
         }
 
@@ -190,10 +192,11 @@ class ProvisioningService
      * 端口预占：指定端口或从 allow_ports 区间自动分配。
      * (server_id, port) 唯一约束是防 TOCTOU 的第一道防线。
      *
+     * @param  array  $reservedPorts  自动分配时跳过的端口（nps 自身监听端口，AUDIT M4）
      * @return int 分配到的端口
      * @throws ProvisioningException 无可用端口
      */
-    public function holdPort(NpsServer $server, ?int $preferred = null, array $allowRanges = []): int
+    public function holdPort(NpsServer $server, ?int $preferred = null, array $allowRanges = [], array $reservedPorts = []): int
     {
         // 先清理过期预占（TTL）
         PortAllocation::where('server_id', $server->id)
@@ -225,6 +228,7 @@ class ProvisioningService
         }
 
         // 自动分配：默认区间 10000-65535（生产应按 nps.conf allow_ports 配置）
+        $reserved = array_flip($reservedPorts);
         $ranges = ! empty($allowRanges) ? $allowRanges : [[10000, 65535]];
         foreach ($ranges as [$min, $max]) {
             // 随机起点降低连续冲突概率
@@ -232,6 +236,9 @@ class ProvisioningService
             $start = $min + random_int(0, max(0, $span - 1));
             for ($i = 0; $i < $span; $i++) {
                 $port = $min + (($start - $min + $i) % $span);
+                if (isset($reserved[$port])) {
+                    continue; // nps 自身监听端口，跳过
+                }
                 $held = $tryHold($port);
                 if ($held !== null) {
                     return $held;
@@ -309,5 +316,39 @@ class ProvisioningService
         } while (NpsClient::where('vkey', $vkey)->exists());
 
         return $vkey;
+    }
+
+    /**
+     * nps 自身监听端口集合：bridge_port + /ext/config 中的端口类键
+     * （自动分配时排除，避免撞 nps 已监听端口，AUDIT M4）。
+     * 读取失败不阻塞分配——run_status 回读校验仍为兜底防线。
+     */
+    private function reservedPorts(NpsServer $server): array
+    {
+        $ports = [];
+        if ($server->bridge_port > 0) {
+            $ports[] = (int) $server->bridge_port;
+        }
+
+        try {
+            $resp = $this->clientFactory->for($server)->extConfigGet();
+            if ($resp->ok) {
+                $listenKeys = ['bridge_port', 'web_port', 'p2p_port', 'http_proxy_port', 'https_proxy_port'];
+                foreach ((array) ($resp->data['entries'] ?? []) as $entry) {
+                    if (in_array($entry['key'] ?? '', $listenKeys, true)) {
+                        $value = (int) ($entry['value'] ?? 0);
+                        if ($value > 0) {
+                            $ports[] = $value;
+                        }
+                    }
+                }
+            }
+        } catch (\Throwable $e) {
+            \Illuminate\Support\Facades\Log::debug(
+                "reserved ports fetch failed for server {$server->id}: {$e->getMessage()}",
+            );
+        }
+
+        return array_values(array_unique($ports));
     }
 }

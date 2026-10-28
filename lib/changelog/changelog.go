@@ -32,9 +32,13 @@ var (
 
 // Append 记录一条变更。在 lib/file 与 web/controllers 的写操作
 // 成功路径调用（每处一行，语义零变化）。
+//
+// seq 分配必须与入队同锁（AUDIT H4）：若先 atomic 取 seq 后抢锁，
+// 并发 Append 会以 seq 乱序写入环形缓冲——Version() 已暴露较大 seq
+// 而较小 seq 尚未入队，Since() 将永久漏掉该变更（镜像漂移至全量对账）。
 func Append(op, typ string, id int) {
-	seq := atomic.AddInt64(&counter, 1)
 	mu.Lock()
+	seq := atomic.AddInt64(&counter, 1)
 	buf[pos] = Entry{Seq: seq, Op: op, Type: typ, Id: id}
 	pos = (pos + 1) % capacity
 	if size < capacity {

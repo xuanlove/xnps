@@ -15,8 +15,11 @@ use Illuminate\Support\Facades\Route;
 
 // ---- P2 用户自助门户（DESIGN.md §8）----
 Route::prefix('portal')->group(function () {
-    Route::post('/register', [AuthController::class, 'register']);
-    Route::post('/login', [AuthController::class, 'login']);
+    // 注册/登录限流（AUDIT M7）
+    Route::middleware('throttle:10,1')->group(function () {
+        Route::post('/register', [AuthController::class, 'register']);
+        Route::post('/login', [AuthController::class, 'login']);
+    });
 
     Route::middleware('auth:sanctum')->group(function () {
         Route::post('/logout', [AuthController::class, 'logout']);
@@ -68,13 +71,15 @@ Route::prefix('admin')
         Route::get('/upgrades/runs/{run}', [UpgradeController::class, 'show']);
     });
 
-// ---- nps 集中管理 API（阶段 1：管理面，生产应叠加 admin 中间件）----
+// ---- nps 集中管理 API（管理面：必须 admin 认证，AUDIT C1）----
 
 // 制品下载端点（nps 出方向拉取，token 鉴权——见 ArtifactDownloadController）
 Route::get('/artifacts/{artifact}/download/{token}', [ArtifactDownloadController::class, 'download'])
     ->where('token', '[A-Za-z0-9]+');
 
-Route::prefix('nps')->group(function () {
+Route::prefix('nps')
+    ->middleware(['auth:sanctum', 'admin'])
+    ->group(function () {
     // 服务器纳管
     Route::get('/servers', [ServerController::class, 'index']);
     Route::post('/servers', [ServerController::class, 'store']);

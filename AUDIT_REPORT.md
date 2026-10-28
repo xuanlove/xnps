@@ -217,3 +217,27 @@
 - composer.lock 锁定版本核对、npm 前端资产（仓库未含前端构建物）。
 - nps 原生 proxy/bridge 全量代码（仅审计 ext 新增路径及其依赖的数据读写路径；上游既有缺陷沿用 PROJECT_DIARY §15 清单）。
 - Windows 平台行为（upgrade/restart 的 Windows 分支为静态判断）。
+
+---
+
+## 六、修复记录（2026-10-28，同日完成）
+
+本节记录第二轮会话按用户指定范围完成的修复：**C1、H1、H2（Go 侧补丁）、H4、M2、M4、M5、M6、M7**。H3/M1/M3/M8 及 Low 项未在本次范围。
+
+| 编号 | 修复内容 | 涉及文件 | 验证方式 |
+|---|---|---|---|
+| C1 | `/api/nps/*` 路由组叠加 `['auth:sanctum','admin']`；`NpsServer` 增加 `$hidden=['auth_key']`（密钥不再出现在任何响应中） | [routes/api.php](file:///workspace/nps-admin/routes/api.php#L71-L79)、[NpsServer.php](file:///workspace/nps-admin/app/Models/NpsServer.php#L19-L22) | 静态核对（tests 无引用冲突）；部署后需用 admin token 复测 401/403 |
+| H1 | 审计日志敏感键递归脱敏：新增 `SENSITIVE_KEYS` 常量与 `maskSensitive()`，params 与 json 双通道脱敏（覆盖 `key_pem_b64/cert_pem_b64/binary/p/password/web_password/auth_*` 等，含 `/ext/config` 的 `entries` 嵌套值） | [NpsApiClient.php](file:///workspace/nps-admin/app/Services/Nps/NpsApiClient.php#L25-L33)、[NpsApiClient.php](file:///workspace/nps-admin/app/Services/Nps/NpsApiClient.php#L326-L354) | php -l ✔；建议部署后抽查 `nps_api_logs` |
+| H2 | **Go 侧补丁**：`/client/edit` 改为"显式传入才修改"语义——`vkey/flow_limit/rate_limit/max_conn/max_tunnel/remark/u/p/compress/crypt/web_username/web_password/config_conn_allow` 均按 `hasParam()` 判定后赋值；新增 `BaseController::hasParam`。部分更新不再清空未传字段（vkey 置空、Basic 认证/门户密码清空、限额归 0 等全部消除）；Web UI 全量提交行为不变 | [base.go](file:///workspace/web/controllers/base.go#L121-L126)、[client.go](file:///workspace/web/controllers/client.go#L115-L164) | **真实实例端到端验证 ✔**：建 client（flow_limit=100/max_conn=5/u=testu/vkey=…）→ 仅传 rate_limit=64 编辑 → 全部字段保留；再全量编辑（Web UI 风格）→ 全部字段正确生效 |
+| H4 | `changelog.Append` 将 seq 分配移入互斥锁内（seq 与环形入队原子化），消除并发乱序导致的 `Since()` 永久漏事件 | [changelog.go](file:///workspace/lib/changelog/changelog.go#L33-L48) | go build/vet ✔ + 单测 4/4 PASS（含环形回绕）✔ |
+| M2 | ① `SyncFlowJob` 增加 `Cache::lock("nps-flow:{serverId}")` 防自循环与调度种子重叠；② `accumulateFlow` 基线读-改-写包事务 + `lockForUpdate`；③ `chargeWallet` 钱包行锁 + 显式建账，paid 判定不再基于过期余额 | [SyncFlowJob.php](file:///workspace/nps-admin/app/Jobs/SyncFlowJob.php#L41-L58)、[BillingService.php](file:///workspace/nps-admin/app/Services/Portal/BillingService.php#L70-L111)、[BillingService.php](file:///workspace/nps-admin/app/Services/Portal/BillingService.php#L283-L298) | php -l ✔（cache_locks 表已随 cache 迁移存在） |
+| M4 | 端口池自动分配排除 nps 自身监听端口：新增 `reservedPorts()`（`bridge_port` + `/ext/config` 的 `bridge_port/web_port/p2p_port/http_proxy_port/https_proxy_port`），`holdPort()` 增加 `$reservedPorts` 参数并在自动分配循环中跳过 | [ProvisioningService.php](file:///workspace/nps-admin/app/Services/Provisioning/ProvisioningService.php#L118-L124)、[ProvisioningService.php](file:///workspace/nps-admin/app/Services/Provisioning/ProvisioningService.php#L199-L250)、[ProvisioningService.php](file:///workspace/nps-admin/app/Services/Provisioning/ProvisioningService.php#L321-L353) | php -l ✔；config 读取失败不阻塞分配（run_status 校验兜底） |
+| M5 | `nps.conf` 写回与备份权限 0644 → **0600** | [config.go](file:///workspace/server/ext/config.go#L118-L146) | **真实实例验证 ✔**：`/ext/config` POST 写入后 `stat` 确认主文件与 `.bak.*` 均为 600 |
+| M6 | ① Go：替换二进制前本地备份（`.bak-ext` / `.bak-ext.old` 双份），备份失败仅告警不阻断，响应带 `backup_path`；② Laravel：precheck 强制"当前线上版本制品必须在库"，否则拒绝升级（避免无法自动回滚陷死） | [upgrade.go](file:///workspace/server/ext/upgrade.go#L102-L115)、[UpgradeOrchestrator.php](file:///workspace/nps-admin/app/Services/Upgrade/UpgradeOrchestrator.php#L242-L248) | go build ✔；预检逻辑静态核对 |
+| M7 | 门户 `register/login` 叠加 `throttle:10,1`；Sanctum token 统一 30 天过期（`createToken(name, ['*'], now()->addDays(30))`，注册与登录两处） | [routes/api.php](file:///workspace/nps-admin/routes/api.php#L16-L22)、[AuthController.php](file:///workspace/nps-admin/app/Http/Controllers/Portal/AuthController.php#L52-L53)、[AuthController.php](file:///workspace/nps-admin/app/Http/Controllers/Portal/AuthController.php#L72-L73) | php -l ✔ |
+
+**回归验证汇总**：
+- Go：`go build ./web/... ./server/ext ./lib/changelog ./cmd/nps` ✔；`go vet` ✔；`changelog` 单测 4/4 PASS ✔。真实 nps 实例（临时 conf，端口 28024/28080/28082）端到端冒烟：`/client/add` → `/client/edit`（部分/全量两轮）→ `/ext/list` 断言字段 ✔；`/ext/config` 写入 + 权限断言 ✔（实例已停止并清理）。
+- PHP：8 个修改文件 `php -l` 全部通过 ✔。
+- 遗留说明：`go build ./...` 全仓失败为**环境固有限制**（`cmd/npc` 上游 sdk.go 重复 main、fyne 依赖缺 X11 头文件），与本次修改无关，受影响包均已单独构建通过。
+- 部署提醒：C1 生效后，`/api/nps/*` 需携带 admin 用户的 Sanctum token（此前直连方式需调整）；M6 预检意味着首次升级某台服务器前，须先把其当前版本制品上传至制品库。

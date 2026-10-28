@@ -16,6 +16,11 @@ class NpsServer extends Model
         'last_synced_at', 'last_reconciled_at', 'status', 'is_reachable',
     ];
 
+    // auth_key 绝不出现在任何 API 响应中（AUDIT C1）
+    protected $hidden = [
+        'auth_key',
+    ];
+
     protected $casts = [
         'auth_key' => 'encrypted',
         'bridge_port' => 'integer',

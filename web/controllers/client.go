@@ -117,23 +117,51 @@ func (s *ClientController) Edit() {
 					s.AjaxErr("Vkey duplicate, please reset")
 					return
 				}
-				c.VerifyKey = s.getEscapeString("vkey")
-				c.Flow.FlowLimit = int64(s.GetIntNoErr("flow_limit"))
-				c.RateLimit = s.GetIntNoErr("rate_limit")
-				c.MaxConn = s.GetIntNoErr("max_conn")
-				c.MaxTunnelNum = s.GetIntNoErr("max_tunnel")
+				// nps-admin-ext 补丁（AUDIT H2）：以下字段仅在被显式提交时修改。
+				// 原实现为全量替换语义，集中管理端的部分更新（如超额限流只传
+				// rate_limit）会把未传字段清零：flow_limit/max_conn 归 0、
+				// vkey 置空、Basic 认证与门户密码被清空
+				if s.hasParam("vkey") {
+					c.VerifyKey = s.getEscapeString("vkey")
+				}
+				if s.hasParam("flow_limit") {
+					c.Flow.FlowLimit = int64(s.GetIntNoErr("flow_limit"))
+				}
+				if s.hasParam("rate_limit") {
+					c.RateLimit = s.GetIntNoErr("rate_limit")
+				}
+				if s.hasParam("max_conn") {
+					c.MaxConn = s.GetIntNoErr("max_conn")
+				}
+				if s.hasParam("max_tunnel") {
+					c.MaxTunnelNum = s.GetIntNoErr("max_tunnel")
+				}
 			}
-			c.Remark = s.getEscapeString("remark")
-			c.Cnf.U = s.getEscapeString("u")
-			c.Cnf.P = s.getEscapeString("p")
-			c.Cnf.Compress = common.GetBoolByStr(s.getEscapeString("compress"))
-			c.Cnf.Crypt = s.GetBoolNoErr("crypt")
+			if s.hasParam("remark") {
+				c.Remark = s.getEscapeString("remark")
+			}
+			if s.hasParam("u") {
+				c.Cnf.U = s.getEscapeString("u")
+			}
+			if s.hasParam("p") {
+				c.Cnf.P = s.getEscapeString("p")
+			}
+			if s.hasParam("compress") {
+				c.Cnf.Compress = common.GetBoolByStr(s.getEscapeString("compress"))
+			}
+			if s.hasParam("crypt") {
+				c.Cnf.Crypt = s.GetBoolNoErr("crypt")
+			}
 			b, err := beego.AppConfig.Bool("allow_user_change_username")
-			if s.GetSession("isAdmin").(bool) || (err == nil && b) {
+			if (s.GetSession("isAdmin").(bool) || (err == nil && b)) && s.hasParam("web_username") {
 				c.WebUserName = s.getEscapeString("web_username")
 			}
-			c.WebPassword = s.getEscapeString("web_password")
-			c.ConfigConnAllow = s.GetBoolNoErr("config_conn_allow")
+			if s.hasParam("web_password") {
+				c.WebPassword = s.getEscapeString("web_password")
+			}
+			if s.hasParam("config_conn_allow") {
+				c.ConfigConnAllow = s.GetBoolNoErr("config_conn_allow")
+			}
 			if c.Rate != nil {
 				c.Rate.Stop()
 			}

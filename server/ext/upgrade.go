@@ -14,6 +14,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/astaxie/beego/logs"
 )
 
 const (
@@ -99,6 +101,21 @@ func Upgrade(req *UpgradeRequest) (map[string]interface{}, error) {
 		return res, nil
 	}
 
+	// 本地回滚备份（AUDIT M6）：替换前把当前二进制复制为 .bak-ext，
+	// 旧的 .bak-ext 顺移为 .bak-ext.old（共保留 2 份），供新二进制
+	// 无法启动时带外手动恢复。备份失败仅告警不阻断升级。
+	backup := binPath + ".bak-ext"
+	if _, statErr := os.Stat(backup); statErr == nil {
+		_ = os.Rename(backup, binPath+".bak-ext.old")
+	}
+	if cur, rerr := ioutil.ReadFile(binPath); rerr == nil {
+		if werr := ioutil.WriteFile(backup, cur, 0755); werr != nil {
+			logs.Warn("ext: backup current binary failed: %s", werr.Error())
+		}
+	} else {
+		logs.Warn("ext: read current binary for backup failed: %s", rerr.Error())
+	}
+
 	// Linux：写临时文件后 rename 原子替换（运行中进程持旧 inode）
 	tmp := binPath + ".ext-upgrade.tmp"
 	if err = ioutil.WriteFile(tmp, data, 0755); err != nil {
@@ -109,6 +126,7 @@ func Upgrade(req *UpgradeRequest) (map[string]interface{}, error) {
 		return nil, err
 	}
 	res["replaced"] = true
+	res["backup_path"] = backup
 	res["note"] = "binary replaced, restart required to take effect"
 	return res, nil
 }

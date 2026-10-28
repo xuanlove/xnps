@@ -115,7 +115,9 @@ func parseConf(path string) ([]confLine, error) {
 	return lines, nil
 }
 
-// writeConf 原子写回（tmp + rename，与 lib/file 的落盘方式一致）
+// writeConf 原子写回（tmp + rename，与 lib/file 的落盘方式一致）。
+// 权限 0600（AUDIT M5）：文件含 auth_key/web_password 等敏感值，
+// 不可对同机其他用户可读。
 func writeConf(path string, lines []confLine) error {
 	var sb strings.Builder
 	for _, l := range lines {
@@ -126,20 +128,20 @@ func writeConf(path string, lines []confLine) error {
 		}
 	}
 	tmp := path + ".tmp"
-	if err := ioutil.WriteFile(tmp, []byte(sb.String()), 0644); err != nil {
+	if err := ioutil.WriteFile(tmp, []byte(sb.String()), 0600); err != nil {
 		return err
 	}
 	return os.Rename(tmp, path)
 }
 
-// backupConf 变更前备份（保留最近 10 份）
+// backupConf 变更前备份（保留最近 10 份，权限 0600 同主文件，AUDIT M5）
 func backupConf(path string) error {
 	b, err := ioutil.ReadFile(path)
 	if err != nil {
 		return err
 	}
 	name := fmt.Sprintf("%s.bak.%d", path, time.Now().UnixNano())
-	if err := ioutil.WriteFile(name, b, 0644); err != nil {
+	if err := ioutil.WriteFile(name, b, 0600); err != nil {
 		return err
 	}
 	// 清理旧备份，仅保留最近 10 份

@@ -67,40 +67,46 @@ class BillingService
             $currentIn = (int) ($flow['in'] ?? 0);
             $currentOut = (int) ($flow['out'] ?? 0);
 
-            $baseline = FlowBaseline::firstOrNew([
-                'client_id' => $client->id,
-                'period' => $period,
-            ]);
+            // 基线读-改-写整体加行锁（AUDIT M2）：自循环与调度种子重叠时，
+            // 并发采样会丢失快照回写导致 delta 重复累加（重复计费）
+            DB::transaction(function () use ($client, $period, $currentIn, $currentOut) {
+                $baseline = FlowBaseline::where('client_id', $client->id)
+                    ->where('period', $period)
+                    ->lockForUpdate()->first();
 
-            if (! $baseline->exists) {
-                // 首次采样：只建基线不计数
-                $baseline->last_in = $currentIn;
-                $baseline->last_out = $currentOut;
-                $baseline->save();
+                if (! $baseline) {
+                    // 首次采样：只建基线不计数
+                    FlowBaseline::create([
+                        'client_id' => $client->id,
+                        'period' => $period,
+                        'last_in' => $currentIn,
+                        'last_out' => $currentOut,
+                    ]);
 
-                continue;
-            }
+                    return;
+                }
 
-            $deltaIn = max(0, $currentIn - $baseline->last_in);
-            $deltaOut = max(0, $currentOut - $baseline->last_out);
-            // nps 重启清零：current < last 时按 current 计（从 0 重新累计）
-            if ($currentIn < $baseline->last_in) {
-                $deltaIn = $currentIn;
-            }
-            if ($currentOut < $baseline->last_out) {
-                $deltaOut = $currentOut;
-            }
+                $deltaIn = max(0, $currentIn - $baseline->last_in);
+                $deltaOut = max(0, $currentOut - $baseline->last_out);
+                // nps 重启清零：current < last 时按 current 计（从 0 重新累计）
+                if ($currentIn < $baseline->last_in) {
+                    $deltaIn = $currentIn;
+                }
+                if ($currentOut < $baseline->last_out) {
+                    $deltaOut = $currentOut;
+                }
 
-            if ($deltaIn > 0 || $deltaOut > 0) {
-                $monthly = FlowMonthly::firstOrCreate([
-                    'user_id' => $client->user_id,
-                    'period' => $period,
-                ]);
-                $monthly->increment('used_in', $deltaIn);
-                $monthly->increment('used_out', $deltaOut);
-            }
+                if ($deltaIn > 0 || $deltaOut > 0) {
+                    $monthly = FlowMonthly::firstOrCreate([
+                        'user_id' => $client->user_id,
+                        'period' => $period,
+                    ]);
+                    $monthly->increment('used_in', $deltaIn);
+                    $monthly->increment('used_out', $deltaOut);
+                }
 
-            $baseline->update(['last_in' => $currentIn, 'last_out' => $currentOut]);
+                $baseline->update(['last_in' => $currentIn, 'last_out' => $currentOut]);
+            });
         }
     }
 
@@ -277,7 +283,11 @@ class BillingService
     public function chargeWallet(User $user, int $amountCents, ?string $refType = null, string $remark = ''): bool
     {
         return DB::transaction(function () use ($user, $amountCents, $refType, $remark) {
-            $wallet = Wallet::firstOrCreate(['user_id' => $user->id]);
+            // 行锁（AUDIT M2）：并发扣款时防止 paid 判定基于过期余额
+            $wallet = Wallet::where('user_id', $user->id)->lockForUpdate()->first();
+            if (! $wallet) {
+                $wallet = Wallet::create(['user_id' => $user->id, 'balance_cents' => 0]);
+            }
             $before = $wallet->balance_cents;
             $wallet->decrement('balance_cents', $amountCents);
             $this->recordTransaction($wallet, 'charge', -$amountCents, $refType, $remark);

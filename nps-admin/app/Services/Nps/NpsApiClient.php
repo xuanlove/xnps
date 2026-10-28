@@ -22,6 +22,16 @@ class NpsApiClient
     /** @var array<string, int> 按 baseUrl 缓存的时钟偏移（秒） */
     private static array $clockOffsets = [];
 
+    /**
+     * 审计日志脱敏键（大小写不敏感，递归匹配）（AUDIT H1）：
+     * 签名参数 / 私钥 / 敏感配置 / Basic 与门户凭据，命中即替换为 ******
+     */
+    private const SENSITIVE_KEYS = [
+        'auth_key', 'auth_crypt_key', 'public_vkey',
+        'web_password', 'password', 'basic_pass', 'p',
+        'key_pem_b64', 'cert_pem_b64', 'binary',
+    ];
+
     public function __construct(
         public readonly NpsServer $server,
     ) {}
@@ -298,7 +308,7 @@ class NpsApiClient
                 'endpoint' => $path,
                 'request' => [
                     'params' => $this->redact($params),
-                    'json' => $json,
+                    'json' => $json !== null ? $this->maskSensitive($json) : null,
                 ],
                 'response' => $result->raw ?: null,
                 'status_code' => $result->statusCode,
@@ -314,12 +324,32 @@ class NpsApiClient
     }
 
     /**
-     * 脱敏：签名参数不落审计日志
+     * 脱敏：签名参数不落审计日志 + 敏感键递归替换（AUDIT H1）
      */
     private function redact(array $params): array
     {
-        unset($params['auth_key'], $params['timestamp']);
+        $masked = $this->maskSensitive($params);
+        unset($masked['auth_key'], $masked['timestamp']);
 
-        return $params;
+        return $masked;
+    }
+
+    private function maskSensitive(mixed $value): mixed
+    {
+        if (! is_array($value)) {
+            return $value;
+        }
+        $out = [];
+        foreach ($value as $key => $val) {
+            if (in_array(strtolower((string) $key), self::SENSITIVE_KEYS, true)) {
+                $out[$key] = '******';
+            } elseif (is_array($val)) {
+                $out[$key] = $this->maskSensitive($val);
+            } else {
+                $out[$key] = $val;
+            }
+        }
+
+        return $out;
     }
 }

@@ -239,6 +239,14 @@ class UpgradeOrchestrator
             throw new \RuntimeException("{$incompatible} online npc with incompatible core version (need {$coreVersion})");
         }
 
+        // 回滚可行性预检（AUDIT M6）：当前线上版本制品必须在库，
+        // 否则升级失败时无法自动回滚（服务器将陷死需人工带外恢复）
+        if (! UpgradeArtifact::where('version', $currentVersion)->exists()) {
+            throw new \RuntimeException(
+                "old artifact {$currentVersion} not in library, rollback impossible (upload the currently running version to the artifact library first)",
+            );
+        }
+
         // conf 快照存档（脱敏版，用于升级前后 diff 审计；升级流程不动 conf 文件）
         $confSnapshot = null;
         $confResp = $api->extConfigGet();

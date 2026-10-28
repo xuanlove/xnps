@@ -118,6 +118,13 @@ func (s *BaseController) GetBoolNoErr(key string, def ...bool) bool {
 	return val
 }
 
+//hasParam 请求是否显式携带了非空参数。
+//nps-admin-ext 补丁（AUDIT H2）：/client/edit 依赖此判断实现
+//"显式传入才修改"语义，部分更新不再清空未传字段
+func (s *BaseController) hasParam(key string) bool {
+	return s.Ctx.Input.Query(key) != ""
+}
+
 //ajax正确返回
 func (s *BaseController) AjaxOk(str string) {
 	s.Data["json"] = ajax(str, 1)

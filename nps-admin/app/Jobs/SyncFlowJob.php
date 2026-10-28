@@ -9,6 +9,7 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 
 /**
@@ -37,9 +38,21 @@ class SyncFlowJob implements ShouldQueue
         // 全局轮转分片：所有服务器同一时刻采同一片，错峰由 dispatch jitter 承担
         $shard = (int) floor(time() / (int) config('nps.flow_interval')) % $total;
 
+        // 防重叠执行（AUDIT M2）：自循环与 console.php 调度种子可能并发，
+        // 拿不到锁说明上一轮仍在跑，本轮跳过（计费基线依赖串行采样）
+        $interval = (int) config('nps.flow_interval');
+        $lock = Cache::lock("nps-flow:{$this->serverId}", max(60, $interval - 60));
         try {
-            $result = $syncEngine->syncFlow($server, $shard, $total);
-            Log::debug("nps flow [{$server->name}] {$result}");
+            if ($lock->get()) {
+                try {
+                    $result = $syncEngine->syncFlow($server, $shard, $total);
+                    Log::debug("nps flow [{$server->name}] {$result}");
+                } finally {
+                    $lock->release();
+                }
+            } else {
+                Log::debug("nps flow [{$server->name}] skipped: previous run still holds the lock");
+            }
         } catch (\Throwable $e) {
             Log::warning("nps flow [{$server->name}] failed: {$e->getMessage()}");
         }

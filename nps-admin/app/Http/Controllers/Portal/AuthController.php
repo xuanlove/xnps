@@ -49,7 +49,8 @@ class AuthController extends Controller
             app(BillingService::class)->recharge($user, $credit, 'welcome credit');
         }
 
-        $token = $user->createToken('portal')->plainTextToken;
+        // token 30 天过期（AUDIT M7：Sanctum 默认永不过期）
+        $token = $user->createToken('portal', ['*'], now()->addDays(30))->plainTextToken;
 
         return response()->json([
             'data' => ['user' => $user, 'token' => $token],
@@ -68,7 +69,8 @@ class AuthController extends Controller
             throw ValidationException::withMessages(['email' => '账号或密码错误']);
         }
 
-        $token = $user->createToken('portal')->plainTextToken;
+        // token 30 天过期（AUDIT M7：Sanctum 默认永不过期）
+        $token = $user->createToken('portal', ['*'], now()->addDays(30))->plainTextToken;
 
         return response()->json([
             'data' => ['user' => $user, 'token' => $token],
