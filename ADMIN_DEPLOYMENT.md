@@ -35,8 +35,7 @@
 | PHP-FPM + Nginx | 运行 Web 与管理 UI | 必需 |
 | MySQL / PostgreSQL | 镜像、账单、审批、支付、审计 | 必需（生产不建议 SQLite） |
 | Redis | 缓存、队列、原子锁（flow 防重叠） | 推荐 |
-| Supervisor | 常驻队列 worker | 必需 |
-| cron / systemd timer | `schedule:run` 调度 | 必需 |
+| Supervisor | 队列 worker + `schedule:work` 调度 | 必需 |
 | Node.js | 构建前端资源（仅构建期） | 发布包已内置可省略 |
 
 ## 2. 部署前准备
@@ -250,6 +249,19 @@ redirect_stderr=true
 stdout_logfile=/var/log/xnps-admin/upgrade.log
 stdout_logfile_maxbytes=50MB
 stdout_logfile_backups=5
+
+; 秒级同步节拍（10s/30s）依赖常驻 scheduler，必须单实例
+[program:xnps-scheduler]
+command=/usr/bin/php /var/www/xnps-admin/artisan schedule:work
+numprocs=1
+user=www-data
+autostart=true
+autorestart=true
+stopwaitsecs=30
+redirect_stderr=true
+stdout_logfile=/var/log/xnps-admin/schedule.log
+stdout_logfile_maxbytes=50MB
+stdout_logfile_backups=5
 ```
 
 ```bash
@@ -338,25 +350,34 @@ request_terminate_timeout = 600s
 
 同步接口耗时参考：`POST /api/nps/servers/{id}/sync` 为同步全量对账（30 万行约 7m32s）；`enable-https` 约 90s；ACME 签发最长约 210s。超过 Nginx/FPM 超时会 504，**大实例优先用 CLI 完成首次对账**。
 
-## 6. 调度（cron）
+## 6. 调度（schedule:work）
 
-```cron
-* * * * * www-data cd /var/www/xnps-admin && /usr/bin/php artisan schedule:run >> /var/log/xnps-admin/schedule.log 2>&1
-```
+秒级同步由常驻 `php artisan schedule:work` 按节拍派发一次性 Job（Job 实现 `ShouldBeUnique`，重复派发会被丢弃）。要求在 Supervisor 中保持 **单实例** 运行（见 §4 `xnps-scheduler`）。
+
+> 不要同时运行 `schedule:work` 与 cron `schedule:run`，否则同一节拍会被重复派发。
+>
+> 仅使用 cron `schedule:run` 时，Laravel 会在分钟内重复执行到期的亚分钟事件；但一次 `schedule:run` 可能持续到分钟末，需用 `flock` 防止相邻 cron 进程重叠。
 
 调度内容（`php artisan schedule:list` 可核对）：
 
 | 频率 | 任务 |
 |---|---|
-| 每 10 分钟 | 派发 sync/online/flow 种子、指标采集种子 |
-| 每 5 分钟 | 告警检查、支付订单过期回收 |
+| 每 10 秒 | 派发 `SyncVersionJob`（版本增量） |
+| 每 30 秒 | 派发 `SyncOnlineJob`（在线状态）、`CollectMetricsJob`（指标采集） |
+| 每 5 分钟 | 派发 `SyncFlowJob`（流量分片）、告警检查、支付订单过期回收 |
 | 每小时 | 审批过期扫描 |
 | 每 6 小时 | 全量对账 |
 | 每日 03:00 | 证书指纹对账 |
 | 每日 | 审计日志清理、指标清理 |
 | 每月 1 日 00:05 | 月度结算 |
 
-> 秒级任务依赖队列 worker 常驻；调度仅负责补充种子，队列停止会导致同步/指标中断。
+备选 cron（仅当无法常驻 scheduler 时；`flock` 防止进程重叠）：
+
+```cron
+* * * * * www-data cd /var/www/xnps-admin && flock -n /tmp/xnps-schedule.lock /usr/bin/php artisan schedule:run >> /var/log/xnps-admin/schedule.log 2>&1
+```
+
+> 队列 worker 停止时不会产生同步；调度与队列都需常驻。
 
 ## 7. 首次上线验收清单
 
@@ -501,7 +522,7 @@ tail -f storage/logs/laravel-$(date +%F).log
 | 启用 HTTPS 后失联 | 按 §9 自锁恢复流程关闭 `web_open_ssl` |
 | 升级 Run 一直 running | worker 超时/中断；检查 `failed_jobs`，必要时将 Run 标记 failed 后重试 |
 | 升级预检失败 | 旧版本制品未入库；版本签名不是 `{core}-ext{ext}`；core 版本不一致 |
-| `jobs` 表持续增长 | 检查是否部署了多个 scheduler；本版本自循环种子仍可能叠加（见 §14） |
+| `jobs` 表持续增长 | 检查是否有多个 scheduler（`schedule:work` 与 cron 并存）；Job 的 `ShouldBeUnique` 会丢弃重复派发，确认无重复部署 |
 
 ## 13. 安全基线
 
@@ -518,7 +539,7 @@ tail -f storage/logs/laravel-$(date +%F).log
 
 - 支付：未实现退款、发票、支付渠道对账报表。
 - 监控：仅落库 + webhook，未内置 Prometheus 指标端点。
-- 同步任务采用“自循环 + 10 分钟种子”，长期运行需关注 `jobs` 表增长（修复计划见 `ITERATION_PLAN.md` P0-1）。
+- 同步任务推荐常驻 `schedule:work`；cron `schedule:run` 也可运行亚分钟事件，但需 `flock` 防进程重叠。
 - 管理 API 默认无限流（登录接口有限流）；生产建议在 Nginx/WAF 层加限制。
 - 未提供多租户强隔离与 HA 部署方案；单管理端故障会影响纳管操作，但不影响 nps 数据面转发。
 

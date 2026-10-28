@@ -81,7 +81,8 @@ php artisan migrate --force
 php artisan nps:admin admin@example.com
 # 注册一台 nps 服务器（CLI 免登录）
 php artisan nps:register <名称> http://<nps地址>:<web端口> <auth_key>
-php artisan queue:work --queue=nps-sync   # 同步循环
+php artisan queue:work --queue=nps-sync   # 同步队列（另有 nps-provision / nps-upgrade）
+php artisan schedule:work                 # 秒级调度（10s/30s）；或 cron schedule:run（需 flock 防重叠）
 ```
 
 **管理控制台**：构建前端后访问 `http://<管理端>/admin`

@@ -13,20 +13,13 @@ return [
     'http_retries' => 2,
 
     // ---- 三层同步（DESIGN.md §6.1）----
-
-    // L2：版本号轮询间隔（秒）——Job 自循环调度
-    'sync_version_interval' => 10,
-
-    // online 轮询间隔（秒）
-    'sync_online_interval' => 30,
-
-    // L3：滚动对账间隔（分钟，经 scheduler 调度）
-    'reconcile_interval_minutes' => 360,
+    // 调度频率固定在 routes/console.php（10s/30s/5min/6h），由常驻
+    // `php artisan schedule:work` 驱动；Job 均为一次性且 ShouldBeUnique。
 
     // /ext/flow 分片总数（DESIGN.md §6.1：16 分片轮转，每 5min 一片）
     'flow_shards' => 16,
 
-    // flow 采集间隔（秒，每片一次）
+    // flow 采集间隔（秒，每片一次；用于分片号推导）
     'flow_interval' => 300,
 
     // /ext/list 对账分页大小
@@ -106,9 +99,7 @@ return [
     // ---- 监控告警（阶段 3）----
 
     'monitor' => [
-        // /ext/system 采集间隔（秒，CollectMetricsJob 自循环）
-        'interval' => 30,
-
+        // 采样频率固定在 routes/console.php（每 30s），由 schedule:work 驱动
         // 指标保留天数
         'metrics_retention_days' => 7,
 
