@@ -61,10 +61,10 @@ write_release_notes() {
 
 xnps 是 ehang-io/nps（GPL-3.0）的衍生分支，本包为 ${3}。
 
-## 本版本（ext ${EXT_VERSION}）要点
-- 内置 ACME：nps 侧 HTTP-01 签发（新增 /ext/acme/issue 与挑战应答）
-- 管理控制台 /admin（Vue 3）+ 支付宝 / 微信支付 v3 + 证书/升级/告警
-- /client/edit 改为"显式传入才修改"语义；conf 0600；升级本地双份备份
+## 本版本（ext 0.2.0）要点
+- /client/edit 改为"显式传入才修改"语义（安全修复）
+- nps.conf 写回/备份权限收紧为 0600
+- /ext/upgrade 替换前本地双份备份（.bak-ext / .bak-ext.old）
 - changelog 并发乱序修复；Web 品牌 XNPS
 
 ## 快速开始（服务端）
