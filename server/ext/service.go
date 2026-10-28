@@ -15,8 +15,10 @@ import (
 	"github.com/kardianos/service"
 )
 
-// ExtVersion 扩展模块版本，集中管理端据此做能力探测
-const ExtVersion = "0.1.0"
+// ExtVersion 扩展模块版本，集中管理端据此做能力探测。
+// 0.2.0：/client/edit 改为显式传入才修改语义（AUDIT H2）、
+// conf 写回权限收紧、升级本地备份（见 README 修改记录）
+const ExtVersion = "0.2.0"
 
 var serviceInstance service.Service
 

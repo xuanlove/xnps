@@ -1,86 +1,171 @@
+<div align="center">
 
-# NPS
-![](https://img.shields.io/github/stars/ehang-io/nps.svg)   ![](https://img.shields.io/github/forks/ehang-io/nps.svg)
-[![Gitter](https://badges.gitter.im/cnlh-nps/community.svg)](https://gitter.im/cnlh-nps/community?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge)
-![Release](https://github.com/ehang-io/nps/workflows/Release/badge.svg)
-![GitHub All Releases](https://img.shields.io/github/downloads/ehang-io/nps/total)
+# xnps
 
-[README](https://github.com/ehang-io/nps/blob/master/README.md)|[中文文档](https://github.com/ehang-io/nps/blob/master/README_zh.md)
+**基于 nps 的高性能内网穿透与集中管理平台（增强分支）**
 
-NPS is a lightweight, high-performance, powerful **intranet penetration** proxy server, with a powerful web management terminal.
+`Go 内核（nps-admin-ext）` · `Laravel 集中管理端（nps-admin）` · `全平台二进制`
 
+[上游项目](https://github.com/ehang-io/nps) · [设计文档](DESIGN.md) · [源码解析](PROJECT_DIARY.md) · [交付总结](DELIVERY.md) · [审计报告](AUDIT_REPORT.md)
 
-![image](https://github.com/ehang-io/nps/blob/master/image/web.png?raw=true)
+</div>
 
-## Feature
+---
 
-- Comprehensive protocol support, compatible with almost all commonly used protocols, such as tcp, udp, http(s), socks5, p2p, http proxy ...
-- Full platform compatibility (linux, windows, macos, Synology, etc.), support installation as a system service simply.
-- Comprehensive control, both client and server control are allowed.
-- Https integration, support to convert backend proxy and web services to https, and support multiple certificates.
-- Just simple configuration on web ui can complete most requirements.
-- Complete information display, such as traffic, system information, real-time bandwidth, client version, etc.
-- Powerful extension functions, everything is available (cache, compression, encryption, traffic limit, bandwidth limit, port reuse, etc.)
-- Domain name resolution has functions such as custom headers, 404 page configuration, host modification, site protection, URL routing, and pan-resolution.
-- Multi-user and user registration support on server.
+## 致敬原作者（必读）
 
-**Didn't find the feature you want? It doesn't matter, click [Enter the document](https://ehang-io.github.io/nps/) to find it!**
+**xnps 不是原创项目，而是 [ehang-io/nps](https://github.com/ehang-io/nps) 的衍生分支（fork）。**
 
-## Quick start
+- 上游项目：**nps** —— 一款轻量、高性能、功能强大的内网穿透代理服务器，由 **ehang-io** 及全体贡献者开发，以 **GPL-3.0** 协议开源发布。
+- 本项目全部核心能力（bridge 通信、协议、隧道模式、Web 管理界面、客户端 npc）均来自上游项目的卓越工作。
+- 我们向原作者与所有贡献者致以诚挚谢意。没有 nps，就没有 xnps。
+- 依据 GPL-3.0 协议要求，本衍生项目同样以 **GPL-3.0** 开源，并在下文完整公开全部修改记录。
+- 上游仓库已归档停止维护，xnps 在其 v0.26.10 基线上以"最小侵入"原则持续维护增强能力。
 
-### Installation
+> 如果你只需要一个纯粹的内网穿透工具，请优先使用原版 [nps](https://github.com/ehang-io/nps)。xnps 面向的是"多台 nps 服务器集中纳管 + 运营化（审批/计费/证书/升级）"场景。
 
-> [releases](https://github.com/ehang-io/nps/releases)
+## 项目组成
 
-Download the corresponding system version, the server and client are separate.
+| 组件 | 技术栈 | 说明 |
+|---|---|---|
+| **xnps**（服务端内核） | Go 1.20+ | 上游 nps 0.26.10 + `nps-admin-ext` 扩展模块（见修改记录） |
+| **xnpc**（客户端） | Go | 与上游 npc 功能一致（同源构建，改名随包发布） |
+| **nps-admin**（集中管理端） | Laravel 12 / PHP 8.2+ | 多服务器纳管、三层同步、自助门户、审批/计费/证书/滚动升级（独立新增组件，不含上游代码） |
 
-### Server start
+## xnps 增强了什么
 
-After downloading the server compressed package, unzip it, and then enter the unzipped folder.
+在上游 nps 之上，`nps-admin-ext` 扩展模块（Web API `/ext/*`）解决原版在**大规模 + 集中管理**场景下的痛点：
 
-- execute installation command
+- **轻量监控** `/ext/system`：O(1) 系统指标（原版 dashboard 为 O(C×T) 且有数据竞争），10 万级 client 下实测 0.1–1ms。
+- **变更日志** `/ext/version` + `/ext/changes`：内存环形变更日志（容量 1 万条），集中端每 10s 轮询 8 字节级版本号，变化才拉增量——替代高频轮询原版 `/client/list`（原版 20 万隧道实测 >60s 超时，`/ext/list` 游标分页 <32ms）。
+- **在线/流量通道** `/ext/online`、`/ext/flow`（16 分片轮转采集，O(T+H)/片）。
+- **运维闭环** `/ext/config`（白名单配置读写 + 原子写 + 备份）、`/ext/cert`（证书下发/指纹对账，激活唯一入口）、`/ext/restart`（202 + 延迟触发）、`/ext/upgrade`（inline/url 双模式，sha256 强校验，rename 原子替换 + 本地双份备份）。
+- **集中管理端能力**：三层同步（L1 写后回读 / L2 10s 增量 / L3 6h 全量对账）、Saga 写补偿、端口池预占、审批流、月度配额计费、证书全生命周期、灰度滚动升级。
 
-For linux、darwin ```sudo ./nps install```
+### 性能实测（10 万 client / 20 万 tunnel）
 
-For windows, run cmd as administrator and enter the installation directory ```nps.exe install```
+| 指标 | 结果 |
+|---|---|
+| ext 各端点延迟 | 0.1 – 32 ms |
+| 原版 `/client/list`（同规模对照） | >60s 超时 |
+| L2 端到端同步延迟 | 64 ms |
+| L3 全量对账（30 万行镜像导入） | 7m32s |
 
-- default ports
+完整数据见 [DELIVERY.md](DELIVERY.md)，验收方法见 [DESIGN.md §6.2](DESIGN.md)。
 
-The default configuration file of nps use 80，443，8080，8024 ports
+## 快速开始
 
-80 and 443 ports for host mode default ports
+### 服务端（xnps）
 
-8080 for web management access port
+```bash
+# 以 linux_amd64 为例，其余平台见 dist/ 发布包
+tar -zxvf xnps-0.26.10-ext0.2.0-linux-amd64.tar.gz && cd xnps
+# 编辑 conf/nps.conf（务必修改 auth_key / web_username / web_password）
+sudo ./xnps start        # 注册为系统服务并启动（支持 install/start/stop/restart/uninstall）
+sudo ./xnps              # 或前台运行
+```
 
-8024 for net bridge port, to communicate between server and client
+### 客户端（xnpc）
 
-- start up
+```bash
+./xnpc -server=1.2.3.4:8024 -vkey=<客户端vkey>
+```
 
-For linux、darwin ```sudo nps start```
+### 集中管理端（nps-admin，可选）
 
-For windows, run cmd as administrator and enter the program directory ```nps.exe start```
+```bash
+cd nps-admin
+composer install && cp .env.example .env && php artisan key:generate
+php artisan migrate --force
+# 注册一台 nps 服务器（CLI 免登录）
+php artisan nps:register <名称> http://<nps地址>:<web端口> <auth_key>
+php artisan queue:work --queue=nps-sync   # 同步循环
+```
 
-```After installation, the windows configuration file is located at C:\Program Files\nps, linux or darwin is located at /etc/nps```
+详细部署（含 systemd、HTTPS 启用防自锁顺序、升级流水线）见 [DELIVERY.md](DELIVERY.md)。
 
-**If you don't find it started successfully, you can check the log (Windows log files are located in the current running directory, linux and darwin are located in /var/log/nps.log).**
+## 构建与打包
 
-- Access server IP:web service port (default is 8080).
-- Login with username and password (default is admin/123, must be modified when officially used).
-- Create a client.
+```bash
+./build-xnps.sh          # 全平台构建 + 打包，产物输出 dist/
+./build-xnps.sh linux amd64   # 仅构建单平台（参数 GOOS GOARCH）
+```
 
-### Client connection
-- Click the + sign in front of the client in web management and copy the startup command.
-- Execute the startup command, Linux can be executed directly, Windows will replace ./npc with npc.exe and execute it with cmd.
+发布包命名：`{server|client}-{版本}-{GOOS}-{GOARCH}[-vN].tar.gz`，server 包内含 `xnps` 二进制、`conf/` 默认配置、`web/views`、`web/static`、`LICENSE`、`RELEASE.md`；client 包内含 `xnpc` 与 `conf/npc.conf`。
 
+## 版本命名
 
-If you need to register to the system service, you can check [Register to the system service](https://ehang-io.github.io/nps/#/use?id=注册到系统服务)
+```
+{上游基线版本}-ext{扩展模块版本}    例如 0.26.10-ext0.2.0
+```
 
-### Configuration
-- After the client connects, configure the corresponding penetration service in the web.
-- For more advanced usage, see [Complete Documentation](https://ehang-io.github.io/nps/)
+- 上游基线版本（`lib/version`）：跟随上游协议兼容性，npc 握手校验以 `core_version`（最低兼容 0.26.0）为准；
+- 扩展模块版本（`server/ext` 的 `ExtVersion`）：xnps 自身能力演进版本，集中管理端据此做能力探测与升级签名校验。
 
-## Contribution
-- If you encounter a bug, you can submit it to the dev branch directly.
-- If you encounter a problem, you can feedback through the issue.
-- The project is under development, and there is still a lot of room for improvement. If you can contribute code, please submit PR to the dev branch.
-- If there is feedback on new features, you can feedback via issues or qq group.
+> 说明：Go module 路径保持 `ehang.io/nps` 不变——这是刻意为之，便于与上游同步补丁，且不影响产品名与二进制名。
+
+## 修改记录（Modifications）
+
+依据 GPL-3.0 第 5(a) 条完整披露。原则：**能新增不修改**；仅有的 2 处语义级修改均因正确性缺陷（详见 [AUDIT_REPORT.md](AUDIT_REPORT.md)）。
+
+### 第 1 轮：nps-admin-ext 扩展模块（纯新增，13 文件 +1338 行）
+
+| 文件 | 类型 | 说明 |
+|---|---|---|
+| `lib/changelog/changelog.go`(+`_test.go`) | 新增 | 内存环形变更日志（seq 单调、回绕检测） |
+| `server/ext/service.go` | 新增 | 版本常量、systemd/execve 重启 |
+| `server/ext/metrics.go` | 新增 | O(1) 系统监控指标 |
+| `server/ext/config.go` | 新增 | nps.conf 白名单读写（原子写 + 备份 + 脱敏） |
+| `server/ext/cert.go` | 新增 | 证书校验落盘 / 指纹查询 |
+| `server/ext/upgrade.go` | 新增 | 二进制升级（sha256 校验 + 原子替换） |
+| `web/controllers/ext.go` | 新增 | `/ext/*` 10 个端点（强制 admin） |
+| `lib/file/db.go` | 侵入 +9 行 | 8 处 `changelog.Append`（均位于持久化成功路径） |
+| `web/controllers/index.go` | 侵入 +2 行 | EditHost 成功路径 1 处 Append |
+| `web/controllers/client.go` | 侵入 +2 行 | ChangeStatus 成功路径 1 处 Append |
+| `web/routers/router.go` | 侵入 +2 行 | ExtController 路由注册（两个分支） |
+| `cmd/nps/nps.go` | 侵入 +2 行 | service 实例注入 |
+
+### 第 2 轮：安全审计修复（2026-10-28）
+
+| 文件 | 修改 | 目的 |
+|---|---|---|
+| `web/controllers/base.go` | +7 行 `hasParam()` | 参数显式性判断 |
+| `web/controllers/client.go` | **语义补丁**：`/client/edit` 由"全量替换"改为"显式传入才修改" | 修复部分更新清空 vkey/Basic 认证/限额的安全缺陷 |
+| `lib/changelog/changelog.go` | seq 分配移入锁内 | 修复并发乱序导致增量同步漏事件 |
+| `server/ext/config.go` | 写回/备份权限 0644 → 0600 | 敏感配置文件不可同机其他用户可读 |
+| `server/ext/upgrade.go` | 替换前本地双份备份 `.bak-ext` | 升级失败可带外自救 |
+| `web/static/page/languages.xml` | UI 品牌 NPS → XNPS | 产品更名 |
+
+### 第 3 轮：项目更名与发布工程
+
+- 新增 `build-xnps.sh`（全平台构建打包脚本）、本 README、各发布包 `RELEASE.md`；
+- `ExtVersion` 0.1.0 → 0.2.0（随第 2 轮行为变更递增）；
+- **nps-admin/**（Laravel 集中管理端）为全新独立组件，不属于上游代码。
+
+### 未修改的已知上游缺陷
+
+为保持与上游可合并性，以下上游既有问题未在内核修复（集中管理端已绕行或缓解）：`/index/start` 虚报成功、`/client/del` 级联删除、`/client/list` O(C×T)、`flow_limit` 生命周期累计语义、`lib/rate` ticker 无 stop 分支、p2p 无锁 map 等。完整清单见 [PROJECT_DIARY.md §15](PROJECT_DIARY.md)。
+
+## 目录结构
+
+```
+├── cmd/nps/            # 服务端入口（构建产物 xnps）
+├── cmd/npc/            # 客户端入口（构建产物 xnpc，与上游同源）
+├── server/ext/         # nps-admin-ext 扩展模块（xnps 核心增量）
+├── lib/changelog/      # 变更日志
+├── web/                # 管理界面（上游 + /ext/* 控制器）
+├── nps-admin/          # Laravel 集中管理端（独立组件）
+├── build-xnps.sh       # 全平台构建打包脚本
+├── DESIGN.md           # v3 设计文档（16 章）
+├── PROJECT_DIARY.md    # 上游源码解析 + 既有缺陷清单
+├── DELIVERY.md         # 交付总结与压测验收
+└── AUDIT_REPORT.md     # 安全审计报告 + 修复记录
+```
+
+## 许可证
+
+本项目基于 [ehang-io/nps](https://github.com/ehang-io/nps) 衍生，遵循 [GPL-3.0](LICENSE) 开源。所有修改同样以 GPL-3.0 发布。
+
+## 免责声明
+
+本项目仅供学习与合法授权的网络管理使用。请勿用于任何未授权的用途，使用者需自行承担使用风险。
