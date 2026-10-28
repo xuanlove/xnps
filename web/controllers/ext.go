@@ -239,6 +239,7 @@ func (s *ExtController) listClients(cursor, limit int) (items []map[string]inter
 		c := v.(*file.Client)
 		item := map[string]interface{}{
 			"id":                c.Id,
+			"verify_key":        c.VerifyKey,
 			"remark":            c.Remark,
 			"status":            c.Status,
 			"addr":              c.Addr,
