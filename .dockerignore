@@ -1,0 +1,7 @@
+.git
+.github
+dist
+.screenshots
+nps-admin
+*.tar.gz
+nps-admin-src.tar.gz

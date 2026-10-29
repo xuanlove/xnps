@@ -4,7 +4,8 @@ TEST_OPTIONS?=
 
 export PATH := ./bin:$(PATH)
 export GO111MODULE := on
-export GOPROXY := https://gocenter.io
+GOPROXY ?= https://proxy.golang.org,direct
+export GOPROXY
 
 # Build a beta version of goreleaser
 build:
@@ -23,6 +24,21 @@ setup:
 test:
 	go test $(TEST_OPTIONS) -failfast -race -coverpkg=./... -covermode=atomic -coverprofile=coverage.txt $(SOURCE_FILES) -run $(TEST_PATTERN) -timeout=2m
 .PHONY: test
+
+# xnps 扩展包测试（上游 lib/pmux 等历史用例不参与）
+test-ext:
+	go test ./server/ext/... ./lib/acmechallenge/... ./lib/changelog/...
+.PHONY: test-ext
+
+# nps-admin PHPUnit（需先 composer install）
+test-admin:
+	cd nps-admin && php artisan test
+.PHONY: test-admin
+
+# 全平台构建打包（产物 dist/*.tar.gz + sha256sums.txt）
+release:
+	./build-xnps.sh
+.PHONY: release
 
 # Run all the tests and opens the coverage report
 cover: test

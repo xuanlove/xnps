@@ -191,8 +191,9 @@ class BillingService
         $overageFee = (int) ceil($overageBytes / (1024 * 1024 * 1024) * $pricePerGb);
 
         $totalFee = $planFee + $overageFee;
+        $startedAt = microtime(true);
 
-        return DB::transaction(function () use ($user, $period, $plan, $planFee, $usedBytes, $includedBytes, $overageBytes, $overageFee, $totalFee) {
+        return DB::transaction(function () use ($user, $period, $plan, $planFee, $usedBytes, $includedBytes, $overageBytes, $overageFee, $totalFee, $startedAt) {
             $bill = Bill::create([
                 'user_id' => $user->id,
                 'period' => $period,
@@ -216,6 +217,11 @@ class BillingService
             } else {
                 $bill->update(['status' => 'paid', 'paid_at' => now()]);
             }
+
+            // 结算耗时（I3 /metrics：nps_billing_settle_duration_seconds）
+            $bill->update([
+                'settle_duration_ms' => (int) round((microtime(true) - $startedAt) * 1000),
+            ]);
 
             return $bill->fresh();
         });

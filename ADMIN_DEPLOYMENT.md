@@ -1,6 +1,6 @@
 # nps-admin 管理端部署文档
 
-适用版本：**xnps 0.26.10-ext0.3.0 / nps-admin 0.3.0**
+适用版本：**xnps 0.26.10-ext0.3.0 / nps-admin 0.4.0（I3 可观测性与运维）**
 
 本文覆盖单机生产部署：依赖安装、环境配置、PHP-FPM/Nginx、队列与调度、权限、支付与 ACME、首次验收、升级回滚、备份与故障排查。
 
@@ -107,7 +107,7 @@ APP_DEBUG=false
 APP_URL=https://admin.example.com
 ASSET_URL=/
 
-LOG_CHANNEL=daily
+LOG_CHANNEL=json
 LOG_LEVEL=warning
 
 DB_CONNECTION=mysql
@@ -445,6 +445,12 @@ NPS_ACME_CERTD_URL=
 NPS_ACME_CERTD_TOKEN=
 NPS_CERTD_DEPLOY_URL=
 NPS_CERTD_TOKEN=
+
+# 可观测性与告警（I3）
+NPS_METRICS_TOKEN=
+NPS_ALERT_WEBHOOK_URL=
+NPS_ALERT_DEBOUNCE_MINUTES=60
+NPS_SLOW_QUERY_MS=500
 ```
 
 - **builtin**：nps 侧 HTTP-01 签发；不支持通配符；要求域名解析到该 nps 且 80 端口可达；首次务必先用 staging 目录验证。
@@ -489,12 +495,12 @@ sudo -u www-data php artisan up
 
 | 对象 | 方式 |
 |---|---|
-| 数据库 | `mysqldump --single-transaction --routines xnps_admin > backup.sql` |
-| 制品库/证书快照 | `tar -czf storage-private.tar.gz storage/app/private` |
-| 配置密钥 | `.env`、`APP_KEY` 离线保管 |
-| nps 侧 | `conf/nps.conf`、`conf/*.pem`、`conf/acme_account.key` |
+| 数据库 | `deploy/backup.sh`（mysqldump --single-transaction --routines） |
+| 制品库 | `deploy/backup.sh` 打包 `storage/app` |
+| 配置密钥 | `.env`、`APP_KEY` 离线保管（`INCLUDE_ENV=1` 可纳入备份） |
+| nps 侧 | `conf/nps.conf`、`conf/*.pem`、`conf/acme_account.key`（`NPS_CONF_DIR=... deploy/backup.sh`） |
 
-建议每日备份、异地保存；恢复后执行 `config:cache` 与 `queue:restart`。
+建议每日备份、异地保存；恢复后执行 `config:cache` 与 `queue:restart`。脚本细节见 §17。
 
 ### 11.3 回滚
 
@@ -511,7 +517,10 @@ php artisan queue:monitor nps-sync,nps-provision,nps-upgrade
 php artisan queue:failed
 php artisan queue:retry all
 php artisan queue:restart
-tail -f storage/logs/laravel-$(date +%F).log
+curl -fsS http://127.0.0.1:8000/healthz | jq .        # I3：DB/缓存/队列/storage
+curl -fsS -H "Authorization: Bearer $NPS_METRICS_TOKEN" http://127.0.0.1:8000/metrics | head
+tail -f storage/logs/laravel-$(date +%F).log          # 非 JSON 通道时
+tail -f storage/logs/laravel-$(date +%F).json         # LOG_CHANNEL=json 时（RotatingFileHandler）
 ```
 
 ### 12.2 故障排查
@@ -536,6 +545,12 @@ tail -f storage/logs/laravel-$(date +%F).log
 | `/ext/cert` 报路径错误 | `web_cert_file` / `web_key_file` 不在 nps `conf/` 目录内 |
 | 管理 API 401/403 | token 过期或 ability 不匹配（admin/portal），重新登录 |
 | `jobs` 表持续增长 | 检查是否有多个 scheduler（`schedule:work` 与 cron 并存）；Job 的 `ShouldBeUnique` 会丢弃重复派发，确认无重复部署 |
+| `/healthz` 返回 503 | 对应 `checks`（database/cache/queue/storage）失败；看 `checks.*.error` 与日志中的 `request_id` |
+| `/metrics` 返回 403 | 设置了 `NPS_METRICS_TOKEN`，抓取端需带 `Authorization: Bearer` 或 `X-Metrics-Token` |
+| 告警未收到 webhook | `failed_jobs` 是否堆积；`alerts.notify_error`/`notify_attempts`；webhook 5 次退避（10s→10min）后进入 failed |
+| 告警不再产生 | 是否命中静默（`/api/admin/monitor/silences`）、去抖窗口 `NPS_ALERT_DEBOUNCE_MINUTES` 未过、或条件已自动 resolve |
+| 日志不是 JSON | 生产应设 `LOG_CHANNEL=json`；检查 `.env` 覆盖了默认通道 |
+| compose `init` 反复失败 | nps 尚未健康或 `NPS_AUTH_KEY` 与 nps 容器 `/conf/nps.conf` 不一致；`docker compose logs init nps` |
 
 ## 13. 安全基线
 
@@ -552,13 +567,142 @@ tail -f storage/logs/laravel-$(date +%F).log
 - 审计日志默认保留 90 天；请求/响应中的私钥、密码、auth_key、vkey 已脱敏。
 - 定期更新 PHP/Laravel/系统依赖；发布前执行 `composer audit` 与 `govulncheck ./server/... ./web/... ./lib/... ./cmd/nps`（当前调用路径 0 漏洞），SBOM 见 `sbom/xnps.cdx.json`（可用 `syft scan dir:. -o cyclonedx-json=...` 重建）。
 - 管理端与被管 nps 之间建议使用 CA 证书并保持 `tls_verify=true`；启用 HTTPS 默认校验证书链，自签场景需在启用动作中显式关闭并会写 warning 日志。
+- `/healthz` 公开（仅返回检查项状态，不含错误详情），建议只允许 LB/VPN 访问；`/metrics` 请设置 `NPS_METRICS_TOKEN` 并限制来源。
+- `LOG_CHANNEL=json` 时日志仍含请求路径与 request_id，勿记录密码/密钥；慢查询日志不记录绑定参数。
 
-## 14. 已知限制
+## 14. 可观测性（I3）
+
+### 14.1 健康检查 `/healthz`
+
+```bash
+curl -fsS http://127.0.0.1:8000/healthz
+# {"status":"ok","checks":{"database":{"ok":true,"duration_ms":1},...},"time":"..."}
+```
+
+- 四项探针：`database`（`select 1`）、`cache`（写入/回读/删除）、`queue`（`Queue::size()` 驱动连通性）、`storage`（`storage/` 可写）。
+- 全部通过返回 **200**；任一失败返回 **503** 且 `status=degraded`；失败只回显异常类名，详情写日志（带 `request_id`）。
+- 适合作为 Nginx upstream 健康检查或容器 healthcheck。
+
+### 14.2 Prometheus `/metrics`
+
+设置 `NPS_METRICS_TOKEN` 后需带 Bearer：
+
+```yaml
+# prometheus.yml
+scrape_configs:
+  - job_name: xnps-admin
+    metrics_path: /metrics
+    authorization:
+      credentials: <NPS_METRICS_TOKEN>
+    static_configs:
+      - targets: ['127.0.0.1:8000']
+```
+
+| 指标 | 含义 |
+|---|---|
+| `nps_server_up{server}` | 纳管 nps 最近一次探活（1/0） |
+| `nps_sync_lag_seconds{server}` | 距上次成功同步的秒数（-1=从未同步） |
+| `nps_server_clients_online{server}` | 本地镜像在线 client 数 |
+| `nps_queue_jobs{queue}` | 各队列积压（-1=读取失败） |
+| `nps_queue_failed_jobs_total` | `failed_jobs` 行数 |
+| `nps_api_requests_window{window}` / `nps_api_errors_window` / `nps_api_error_ratio` | 最近窗口的 nps API 调用量/失败量/错误率 |
+| `nps_billing_settle_duration_seconds{stat=avg\|max}` | 最近 24h 账单结算耗时 |
+| `nps_billing_settled_total` | 最近 24h 结算账单数 |
+| `nps_upgrade_runs{status}` | 升级 Run 各状态数量 |
+| `nps_alerts_open{level}` | 未解决告警数 |
+
+Grafana 推荐面板（JSON 见 `deploy/grafana/xnps-dashboard.json`）：
+
+```promql
+max by (server) (nps_sync_lag_seconds)
+sum by (queue) (nps_queue_jobs)
+nps_api_error_ratio
+max(nps_billing_settle_duration_seconds{stat="max"})
+sum(nps_upgrade_runs{status="failed"})
+sum(nps_alerts_open)
+```
+
+### 14.3 结构化日志与追踪
+
+- 生产默认 `LOG_CHANNEL=json`（`APP_ENV=production` 且未显式设置时）；本地开发保持 `stack/single`。
+- 每个 HTTP 请求生成/透传 `X-Request-Id`（8–64 位 `[A-Za-z0-9._-]`），写入日志上下文并回显响应头；Nginx 可用 `$request_id` 透传。
+- 慢查询：`NPS_SLOW_QUERY_MS=500` 时记录 `sql`/`time_ms`/`connection`（不含绑定参数）。
+- 同步/指标/对账 Job 自动写入 `server_id` 与 `job` 上下文，结合审计表可还原“哪台服务器、哪一跳”失败。
+- 日志示例：
+
+```bash
+tail -f storage/logs/laravel-$(date +%F).json | jq -c '{time:.datetime, level:.level_name, msg:.message, request_id:.context.request_id}'
+```
+
+### 14.4 告警运维 API
+
+| 方法与路径 | 说明 |
+|---|---|
+| `GET /api/admin/monitor/alerts?status=open&level=critical&server_id=1` | 告警分页列表 |
+| `POST /api/admin/monitor/alerts/{id}/acknowledge` | 确认（值班认领） |
+| `POST /api/admin/monitor/alerts/{id}/resolve` | 手动解决 |
+| `POST /api/admin/monitor/alerts/silence` | 静默：`{server_id?,type?,minutes,reason?}` |
+| `GET /api/admin/monitor/silences` / `DELETE /api/admin/monitor/silences/{id}` | 静默列表/取消 |
+
+- 去抖：同 server+type 在 `NPS_ALERT_DEBOUNCE_MINUTES`（默认 60）内且未 resolve 不重复；条件恢复时服务器级告警自动 resolve。
+- webhook：`NPS_ALERT_WEBHOOK_URL`；投递 Job 指数退避（10s/30s/2min/5min/10min，共 5 次），`alerts.notify_attempts/notify_error` 记录结果。
+
+## 15. Docker Compose 开发栈
+
+```bash
+docker compose up -d --build
+docker compose ps
+docker compose logs -f init     # 迁移 + 管理员 + 纳管 nps
+```
+
+- 服务：`db`（MySQL 8）、`nps`（Dockerfile.nps）、`init`（一次性初始化）、`admin`（:8000）、`queue`、`scheduler`。
+- 默认值均为**开发口令**：`APP_KEY`、`DB_PASSWORD`、`ADMIN_PASSWORD=admin12345`、`NPS_AUTH_KEY=xnps-docker-dev-key`；生产必须通过环境变量覆盖。
+- nps 配置位于 `nps-conf` 持久卷（`/conf`）；启动脚本用 `NPS_AUTH_KEY` / `NPS_WEB_PASSWORD` 覆盖 `nps.conf` 对应项，其余配置可 `docker compose exec nps vi /conf/nps.conf` 后重启。
+- 重置：`docker compose down -v`（会删除数据库与制品卷）。
+
+## 16. systemd 单元
+
+`deploy/systemd/` 提供三个模板（替换路径/用户后安装）：
+
+```bash
+sudo cp deploy/systemd/xnps.service /etc/systemd/system/
+sudo cp deploy/systemd/xnps-admin-scheduler.service /etc/systemd/system/
+sudo cp deploy/systemd/xnps-admin-queue@.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now xnps xnps-admin-scheduler
+sudo systemctl enable --now xnps-admin-queue@nps-sync xnps-admin-queue@nps-provision xnps-admin-queue@nps-upgrade
+```
+
+- `schedule:work` 必须单实例；不要同时启用 cron `schedule:run`。
+- queue 实例名即队列名；`--timeout=900` 需与 `DB_QUEUE_RETRY_AFTER/REDIS_QUEUE_RETRY_AFTER` 匹配。
+- 与 Supervisor 二选一，不要重复拉起。
+
+## 17. 备份与恢复
+
+```bash
+# 每日备份（数据库 + storage/app；可选 nps conf 与 .env）
+APP_DIR=/var/www/xnps-admin BACKUP_DIR=/var/backups/xnps RETENTION_DAYS=14 \
+NPS_CONF_DIR=/opt/xnps/conf INCLUDE_ENV=1 /var/www/xnps-admin/deploy/backup.sh
+
+# crontab（备份脚本自带保留期清理）
+15 3 * * * APP_DIR=/var/www/xnps-admin BACKUP_DIR=/var/backups/xnps /var/www/xnps-admin/deploy/backup.sh >>/var/log/xnps-backup.log 2>&1
+
+# 恢复（先停 queue/scheduler；脚本会校验 sha256sums.txt）
+sudo systemctl stop 'xnps-admin-queue@*' xnps-admin-scheduler
+RESTORE_CONFIRM=yes APP_DIR=/var/www/xnps-admin /var/www/xnps-admin/deploy/restore.sh /var/backups/xnps/20261029T000000Z
+sudo systemctl start 'xnps-admin-queue@*' xnps-admin-scheduler
+```
+
+- MySQL 凭据从 `.env` 读取，临时 client 配置 600 权限，不出现在进程参数中。
+- SQLite 部署走 `.backup`（失败回退文件复制）。
+- 恢复后执行 `php artisan migrate --force && php artisan queue:restart`。
+
+## 18. 已知限制
 
 - 支付：未实现退款、发票、支付渠道对账报表。
-- 监控：仅落库 + webhook，未内置 Prometheus 指标端点。
+- 监控：已提供 `/metrics` 与 webhook 通知，但未集成 Alertmanager/PagerDuty；webhook 为简单 JSON POST。
 - 同步任务推荐常驻 `schedule:work`；cron `schedule:run` 也可运行亚分钟事件，但需 `flock` 防进程重叠。
-- 管理 API 已内置 120 次/分钟限流与登录 5 次/分钟限流；仍建议在 Nginx/WAF 层叠加来源限制。
+- 管理 API 已内置限流；仍建议在 Nginx/WAF 层叠加来源限制。
 - 未提供多租户强隔离与 HA 部署方案；单管理端故障会影响纳管操作，但不影响 nps 数据面转发。
 
 ## 附录 A：生产 `.env` 完整模板
@@ -625,15 +769,21 @@ NPS_ACME_CERTD_TOKEN=
 NPS_CERTD_DEPLOY_URL=
 NPS_CERTD_TOKEN=
 
-# 告警
+# 可观测性与告警（I3）
 NPS_ALERT_WEBHOOK_URL=
+NPS_ALERT_DEBOUNCE_MINUTES=60
+NPS_METRICS_TOKEN=
+NPS_SLOW_QUERY_MS=500
 ```
 
 ## 附录 B：验收命令速查
 
 ```bash
-# 健康
-curl -fsS https://admin.example.com/up
+# 健康（I3：DB/缓存/队列/storage）
+curl -fsS https://admin.example.com/healthz
+
+# Prometheus 指标（配置了 NPS_METRICS_TOKEN 时）
+curl -fsS -H "Authorization: Bearer $NPS_METRICS_TOKEN" https://admin.example.com/metrics | head
 
 # 管理员登录
 curl -s -X POST https://admin.example.com/api/admin/login \

@@ -106,7 +106,21 @@ return [
         'token' => env('NPS_CERTD_TOKEN', ''),
     ],
 
-    // ---- 监控告警（阶段 3）----
+    // ---- 可观测性（I3）----
+
+    // /metrics 需要 Bearer token（空=公开；生产建议设置并限制来源）
+    'metrics_token' => env('NPS_METRICS_TOKEN', ''),
+
+    // /metrics 中 API 错误率统计窗口（分钟）
+    'metrics_api_window_minutes' => 15,
+
+    // 队列积压统计的队列名（与 Supervisor worker 一致）
+    'queues' => ['nps-sync', 'nps-provision', 'nps-upgrade', 'default'],
+
+    // 慢查询日志阈值（毫秒，0=关闭）
+    'slow_query_ms' => (int) env('NPS_SLOW_QUERY_MS', 0),
+
+    // ---- 监控告警（阶段 3 / I3）----
 
     'monitor' => [
         // 采样频率固定在 routes/console.php（每 30s），由 schedule:work 驱动
@@ -117,10 +131,14 @@ return [
         'alerts' => [
             'cpu_percent' => 90,
             'mem_percent' => 90,
+            'disk_percent' => 90,
             'sync_lag_minutes' => 5,
         ],
 
-        // 可选 webhook 通知（空=仅落库+日志）
+        // 同 server+type 去抖窗口（分钟，未解决告警不重复）
+        'alert_debounce_minutes' => (int) env('NPS_ALERT_DEBOUNCE_MINUTES', 60),
+
+        // 可选 webhook 通知（空=仅落库+日志）；投递经 SendAlertWebhook 指数退避重试
         'webhook_url' => env('NPS_ALERT_WEBHOOK_URL', ''),
     ],
 ];

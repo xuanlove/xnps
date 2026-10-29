@@ -26,17 +26,21 @@ class RegisterServerCommand extends Command
 
     public function handle(NpsApiClientFactory $factory, SyncEngine $syncEngine): int
     {
-        $server = NpsServer::create([
-            'name' => $this->argument('name'),
+        // 幂等：同名服务器重复注册时更新连接参数（compose init 可安全重跑）
+        $server = NpsServer::firstOrNew(['name' => $this->argument('name')]);
+        $server->fill([
             'api_url' => rtrim($this->argument('api_url'), '/'),
             'auth_key' => $this->argument('auth_key'),
             'bridge_type' => $this->option('bridge-type'),
             'bridge_port' => (int) $this->option('bridge-port'),
-        ]);
+        ])->save();
+        $created = $server->wasRecentlyCreated;
 
         $resp = $factory->for($server)->extVersion();
         if (! $resp->ok) {
-            $server->delete();
+            if ($created) {
+                $server->delete();
+            }
             $this->error("unreachable or auth failed: {$resp->msg}");
 
             return self::FAILURE;

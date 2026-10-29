@@ -1,0 +1,22 @@
+[Unit]
+Description=xnps-admin scheduler (schedule:work)
+Documentation=https://github.com/xuanlove/xnps
+After=network-online.target mysql.service redis.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/var/www/xnps-admin
+ExecStart=/usr/bin/php artisan schedule:work
+Restart=on-failure
+RestartSec=5
+# 单实例：不要同时启用 cron schedule:run
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/var/www/xnps-admin/storage /var/www/xnps-admin/bootstrap/cache
+
+[Install]
+WantedBy=multi-user.target

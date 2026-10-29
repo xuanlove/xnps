@@ -22,7 +22,7 @@ const ExtVersion = "0.3.0"
 var serviceInstance service.Service
 
 // SetServiceInstance 由 cmd/nps 在服务启动时注入系统服务实例
-//（cmd/nps/nps.go 的 nps.Start 中一行调用，纯新增）。
+// （cmd/nps/nps.go 的 nps.Start 中一行调用，纯新增）。
 func SetServiceInstance(s service.Service) {
 	serviceInstance = s
 }
