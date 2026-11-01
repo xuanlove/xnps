@@ -7,6 +7,7 @@ use App\Models\NpsServer;
 use App\Models\UpgradeArtifact;
 use App\Models\UpgradeRun;
 use App\Models\UpgradeStep;
+use App\Services\Monitor\AlertService;
 use App\Services\Nps\NpsApiClientFactory;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
@@ -29,6 +30,7 @@ class UpgradeOrchestrator
 {
     public function __construct(
         private readonly NpsApiClientFactory $clientFactory,
+        private readonly AlertService $alerts,
     ) {}
 
     // ------------------------------------------------------------------
@@ -99,20 +101,60 @@ class UpgradeOrchestrator
                 return $run->fresh();
             }
 
-            // canary 成功 → 观察窗口（生产 15 分钟；测试可传 0）
+            // canary 成功 → 观察窗口（生产 15 分钟；测试可传 0），
+            // 观察结束必须复检一次版本/可达性（I3.1），避免“睡完即视为健康”。
             if ($serverId === $canaryServerId && $index < count($ordered) - 1 && $observeSeconds > 0) {
                 Log::info("upgrade run {$run->id}: canary ok, observing {$observeSeconds}s");
-                sleep(min($observeSeconds, 900)); // 单次观察上限 15 分钟（Job 超时兜底）
+                sleep(min($observeSeconds, 900));
+                if (! $this->versionMatches($server, $artifact->version)) {
+                    $error = "canary unhealthy after {$observeSeconds}s observation";
+                    $rollback = $this->rollback($server, (string) ($result['old'] ?? ''), $this->clientFactory->for($server));
+                    $run->steps()->where('server_id', $server->id)->update([
+                        'status' => $rollback['ok'] ? UpgradeStep::STATUS_ROLLED_BACK : UpgradeStep::STATUS_FAILED,
+                        'new_version' => $rollback['ok'] ? ($result['old'] ?? null) : null,
+                        'error' => $error.'; rollback: '.($rollback['ok'] ? 'ok' : $rollback['error']),
+                        'finished_at' => now(),
+                    ]);
+                    $this->alerts->raise($server, 'upgrade_failed', 'critical',
+                        "upgrade to {$artifact->version} failed on {$server->name} after canary observation, "
+                            .($rollback['ok'] ? 'rolled back' : 'ROLLBACK ALSO FAILED'),
+                        ['verify_error' => $error, 'rollback' => $rollback],
+                    );
+                    $results[$serverId] = ['status' => $rollback['ok'] ? 'rolled_back' : 'failed', 'error' => $error];
+                    $run->update([
+                        'status' => UpgradeRun::STATUS_ABORTED,
+                        'summary' => [
+                            'aborted_at' => $serverId,
+                            'reason' => 'canary observation failed',
+                            'results' => $results,
+                        ],
+                        'finished_at' => now(),
+                    ]);
+
+                    return $run->fresh();
+                }
             }
         }
 
+        $skipped = count(array_filter($results, fn ($r) => ($r['status'] ?? '') === 'skipped'));
+        $attempted = count($serverIds) - $skipped;
         $succeeded = count(array_filter($results, fn ($r) => ($r['status'] ?? '') === 'succeeded'));
+        $rolledBack = count(array_filter($results, fn ($r) => ($r['status'] ?? '') === 'rolled_back'));
+
+        $status = match (true) {
+            $attempted === 0 => UpgradeRun::STATUS_ABORTED,
+            $succeeded === $attempted => UpgradeRun::STATUS_SUCCEEDED,
+            default => UpgradeRun::STATUS_FAILED,
+        };
         $run->update([
-            'status' => $succeeded === count($serverIds) ? UpgradeRun::STATUS_SUCCEEDED : UpgradeRun::STATUS_FAILED,
+            'status' => $status,
             'summary' => [
                 'total' => count($serverIds),
+                'skipped' => $skipped,
+                'attempted' => $attempted,
                 'succeeded' => $succeeded,
-                'failed' => count($serverIds) - $succeeded,
+                'failed' => $attempted - $succeeded,
+                'rolled_back' => $rolledBack,
                 'results' => $results,
                 'artifact' => $artifact->version,
             ],
@@ -185,13 +227,10 @@ class UpgradeOrchestrator
             'result' => ['verify' => $verify, 'rollback' => $rollback],
             'finished_at' => now(),
         ]);
-        \App\Models\Alert::create([
-            'server_id' => $server->id,
-            'type' => 'upgrade_failed',
-            'level' => 'critical',
-            'message' => "upgrade to {$artifact->version} failed on {$server->name}, ".($rollback['ok'] ? 'rolled back' : 'ROLLBACK ALSO FAILED'),
-            'context' => ['verify' => $verify, 'rollback' => $rollback],
-        ]);
+        $this->alerts->raise($server, 'upgrade_failed', 'critical',
+            "upgrade to {$artifact->version} failed on {$server->name}, ".($rollback['ok'] ? 'rolled back' : 'ROLLBACK ALSO FAILED'),
+            ['verify' => $verify, 'rollback' => $rollback],
+        );
 
         return ['status' => $rollback['ok'] ? 'rolled_back' : 'failed', 'error' => $verify['error']];
     }
@@ -210,13 +249,7 @@ class UpgradeOrchestrator
             'error' => $message,
             'finished_at' => now(),
         ]);
-        \App\Models\Alert::create([
-            'server_id' => $server->id,
-            'type' => 'upgrade_failed',
-            'level' => 'critical',
-            'message' => $message,
-            'context' => ['error' => $error],
-        ]);
+        $this->alerts->raise($server, 'upgrade_failed', 'critical', $message, ['error' => $error]);
 
         return ['status' => 'failed', 'error' => $message];
     }
@@ -283,6 +316,20 @@ class UpgradeOrchestrator
     // ------------------------------------------------------------------
 
     /**
+     * 快速版本复检（不进入退避睡眠），用于 canary 观察窗口结束后确认健康。
+     */
+    private function versionMatches(NpsServer $server, string $expectedVersion): bool
+    {
+        $resp = $this->clientFactory->for($server)->extVersion();
+        if (! $resp->ok) {
+            return false;
+        }
+        $data = (array) $resp->data;
+
+        return sprintf('%s-ext%s', $data['version'] ?? '', $data['ext_version'] ?? '') === $expectedVersion;
+    }
+
+    /**
      * 等待重启完成并核对新版本（/ext/version）。
      * 版本签名约定："{version}-ext{ext_version}"（如 0.26.10-ext0.1.1），
      * 与制品库的 version 字段一致——同时覆盖 nps 版本与 ext 模块版本
@@ -315,7 +362,11 @@ class UpgradeOrchestrator
      */
     private function rollback(NpsServer $server, string $oldVersion, $api): array
     {
-        $oldArtifact = UpgradeArtifact::where('version', $oldVersion)->first();
+        // 与预检保持一致：兼容 {core}-ext{ext} 签名与裸 core 两种历史入库口径
+        $coreVersion = preg_replace('/-ext[^/]+$/', '', $oldVersion);
+        $oldArtifact = UpgradeArtifact::where('version', $oldVersion)
+            ->orWhere('version', $coreVersion)
+            ->first();
         if (! $oldArtifact) {
             return ['ok' => false, 'error' => "old artifact {$oldVersion} not in library（无法自动回滚，需人工介入）"];
         }

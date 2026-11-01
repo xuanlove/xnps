@@ -199,3 +199,22 @@ bafde1d fix(ext): restore verify_key in /ext/list
 ```
 
 > 全部阶段均通过真实 nps 实例端到端验证；压测数据见 §4 阶段 5。
+
+---
+
+## 10. I3.1 运维演练记录（2026-11-01）
+
+环境：沙箱内真实 xnps 0.26.10-ext0.3.0 + nps-admin（SQLite、`schedule:work` 手动触发）。
+
+| 步骤 | 结果 |
+|---|---|
+| `nps:register drill-nps http://127.0.0.1:38088 testkey` | 探活成功，首轮对账 1 client / 0 tunnel / 0 host |
+| 停止 nps 后 `nps:sync` | `is_reachable=0` |
+| `MonitoringService::checkAll()` | `new_alerts=1`，`unreachable/critical` 告警 `open` |
+| 重启 nps 后 `nps:sync` | `is_reachable=1`，`no changes` |
+| 再次 `checkAll()` | `new_alerts=0`，原告警 `resolved`（自动恢复） |
+| `GET /healthz` | 200，`status=ok`，响应头含 `X-Request-Id` |
+| `GET /metrics` | 输出 `nps_server_up`、`nps_sync_lag_seconds`、`nps_queue_jobs` 等序列 |
+
+说明：沙箱无 Docker，`docker compose up` 与 Grafana 实际抓取未执行；Compose/镜像构建已纳入 CI `docker` job 做静态与构建校验。
+

@@ -2,9 +2,7 @@
 
 namespace App\Services\Monitor;
 
-use App\Jobs\SendAlertWebhook;
 use App\Models\Alert;
-use App\Models\AlertSilence;
 use App\Models\NpsServer;
 use App\Models\ServerMetric;
 use App\Services\Nps\NpsApiClientFactory;
@@ -21,6 +19,7 @@ class MonitoringService
 {
     public function __construct(
         private readonly NpsApiClientFactory $clientFactory,
+        private readonly AlertService $alerts,
     ) {}
 
     // ------------------------------------------------------------------
@@ -206,62 +205,10 @@ class MonitoringService
     // ------------------------------------------------------------------
 
     /**
-     * 告警去抖 + 静默 + 排队通知（I3）
+     * 告警创建（统一走 AlertService：去抖 + 静默 + webhook，I3.1）
      */
     private function raise(?NpsServer $server, string $type, string $level, string $message, array $context = []): int
     {
-        if ($this->isSilenced($server, $type)) {
-            Log::info("alert silenced: {$type} on ".($server?->name ?? 'platform'));
-
-            return 0;
-        }
-
-        // 去抖：同 server+type 在窗口内且未 resolved 的告警不重复（窗口可配置）
-        $debounce = (int) config('nps.monitor.alert_debounce_minutes', 60);
-        $exists = Alert::where('server_id', $server?->id)
-            ->where('type', $type)
-            ->where('status', '!=', Alert::STATUS_RESOLVED)
-            ->where('created_at', '>', now()->subMinutes($debounce))
-            ->exists();
-        if ($exists) {
-            return 0;
-        }
-
-        $alert = Alert::create([
-            'server_id' => $server?->id,
-            'type' => $type,
-            'level' => $level,
-            'status' => Alert::STATUS_OPEN,
-            'message' => $message,
-            'context' => $context,
-            'notified' => false,
-            'created_at' => now(),
-        ]);
-
-        if ((string) config('nps.monitor.webhook_url') !== '') {
-            SendAlertWebhook::dispatch($alert->id)->onQueue('nps-sync');
-        }
-
-        Log::warning("ALERT [{$level}] {$type}: {$message}");
-
-        return 1;
-    }
-
-    /**
-     * 静默匹配：server_id/type 为空的静默记录分别匹配全部服务器/全部类型。
-     */
-    private function isSilenced(?NpsServer $server, string $type): bool
-    {
-        return AlertSilence::where('until', '>', now())
-            ->where(function ($q) use ($server) {
-                $q->whereNull('server_id');
-                if ($server !== null) {
-                    $q->orWhere('server_id', $server->id);
-                }
-            })
-            ->where(function ($q) use ($type) {
-                $q->whereNull('type')->orWhere('type', $type);
-            })
-            ->exists();
+        return $this->alerts->raise($server, $type, $level, $message, $context) !== null ? 1 : 0;
     }
 }

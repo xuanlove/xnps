@@ -2,8 +2,8 @@
 
 namespace App\Jobs;
 
-use App\Models\Alert;
 use App\Services\Cert\CertificateService;
+use App\Services\Monitor\AlertService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldBeUnique;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -24,21 +24,20 @@ class RenewCertificatesJob implements ShouldQueue, ShouldBeUnique
 
     public int $uniqueFor = 3600;
 
-    public function handle(CertificateService $service): void
+    public function handle(CertificateService $service, AlertService $alerts): void
     {
         try {
             $stats = $service->renewExpiring();
             Log::info('certificate renewal finished', $stats);
         } catch (\Throwable $e) {
             Log::error('certificate renewal job failed: '.$e->getMessage());
-            Alert::create([
-                'server_id' => null,
-                'type' => 'cert_renew_failed',
-                'level' => 'critical',
-                'message' => 'certificate renewal job failed: '.$e->getMessage(),
-                'context' => ['error' => $e->getMessage()],
-                'created_at' => now(),
-            ]);
+            $alerts->raise(
+                null,
+                'cert_renew_failed',
+                'critical',
+                'certificate renewal job failed: '.$e->getMessage(),
+                ['error' => $e->getMessage()],
+            );
         }
     }
 }

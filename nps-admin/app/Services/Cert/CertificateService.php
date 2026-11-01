@@ -2,10 +2,10 @@
 
 namespace App\Services\Cert;
 
-use App\Models\Alert;
 use App\Models\Certificate;
 use App\Models\CertificateDeployment;
 use App\Models\NpsServer;
+use App\Services\Monitor\AlertService;
 use App\Services\Nps\NpsApiClientFactory;
 use App\Services\Nps\NpsException;
 use Illuminate\Support\Facades\Log;
@@ -22,6 +22,7 @@ class CertificateService
         private readonly NpsApiClientFactory $clientFactory,
         private readonly NativeChannel $nativeChannel,
         private readonly CertdChannel $certdChannel,
+        private readonly AlertService $alerts,
     ) {}
 
     // ------------------------------------------------------------------
@@ -208,13 +209,13 @@ class CertificateService
                 $stats['ok']++;
             } else {
                 $stats['mismatch']++;
-                \App\Models\Alert::create([
-                    'server_id' => $server->id,
-                    'type' => 'cert_mismatch',
-                    'level' => 'warning',
-                    'message' => $result['message'],
-                    'context' => $result['remote'],
-                ]);
+                $this->alerts->raise(
+                    $server,
+                    'cert_mismatch',
+                    'warning',
+                    $result['message'],
+                    (array) ($result['remote'] ?? []),
+                );
             }
         }
 
@@ -343,16 +344,9 @@ class CertificateService
 
     private function raiseRenewAlert(?NpsServer $server, Certificate $cert, string $message, array $context = []): void
     {
-        Alert::create([
-            'server_id' => $server?->id,
-            'type' => 'cert_renew_failed',
-            'level' => 'critical',
-            'message' => $message,
-            'context' => $context + [
-                'certificate_id' => $cert->id,
-                'domains' => $cert->domains,
-            ],
-            'created_at' => now(),
+        $this->alerts->raise($server, 'cert_renew_failed', 'critical', $message, $context + [
+            'certificate_id' => $cert->id,
+            'domains' => $cert->domains,
         ]);
     }
 }

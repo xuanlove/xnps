@@ -4,6 +4,7 @@ namespace App\Services\Cert;
 
 use App\Models\Certificate;
 use App\Models\NpsServer;
+use App\Services\Monitor\AlertService;
 use App\Services\Nps\NpsApiClientFactory;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
@@ -25,6 +26,7 @@ class HttpsProvisioner
     public function __construct(
         private readonly NpsApiClientFactory $clientFactory,
         private readonly CertificateService $certificateService,
+        private readonly AlertService $alerts,
     ) {}
 
     /**
@@ -63,13 +65,13 @@ class HttpsProvisioner
         if (! $healthy['ok']) {
             // 自锁恢复路径：回滚 web_open_ssl（此时 HTTP 也可能不可用——
             // 回滚需带外或等待 nps 重启后 HTTP 探测，记录告警由人工处理）
-            \App\Models\Alert::create([
-                'server_id' => $server->id,
-                'type' => 'https_enable_failed',
-                'level' => 'critical',
-                'message' => 'HTTPS enable failed at health check: '.$healthy['error'],
-                'context' => ['https_url' => $httpsUrl, 'steps' => $steps],
-            ]);
+            $this->alerts->raise(
+                $server,
+                'https_enable_failed',
+                'critical',
+                'HTTPS enable failed at health check: '.$healthy['error'],
+                ['https_url' => $httpsUrl, 'steps' => $steps],
+            );
             throw new \RuntimeException('step 4 failed (https health check): '.$healthy['error']);
         }
         $steps[] = '4. https health check passed';
