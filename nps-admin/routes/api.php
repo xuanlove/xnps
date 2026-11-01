@@ -90,9 +90,14 @@ Route::prefix('admin')
         Route::post('/certificates/{certificate}/rotate/{server}', [CertificateController::class, 'rotate']);
         Route::post('/certificates/verify/{server}', [CertificateController::class, 'verify']);
 
-        // 监控与告警（阶段 3）
+        // 监控与告警（阶段 3 / I3）
         Route::get('/monitor/{server}/metrics', [MonitorController::class, 'metrics']);
         Route::get('/monitor/alerts', [MonitorController::class, 'alerts']);
+        Route::post('/monitor/alerts/silence', [MonitorController::class, 'silence']);
+        Route::post('/monitor/alerts/{alert}/acknowledge', [MonitorController::class, 'acknowledge']);
+        Route::post('/monitor/alerts/{alert}/resolve', [MonitorController::class, 'resolve']);
+        Route::get('/monitor/silences', [MonitorController::class, 'silences']);
+        Route::delete('/monitor/silences/{silence}', [MonitorController::class, 'unsilence']);
         Route::post('/monitor/check', [MonitorController::class, 'check']);
 
         // 版本滚动升级（DESIGN.md §9，阶段 4）

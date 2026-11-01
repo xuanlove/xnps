@@ -36,6 +36,8 @@ class ReconcileServerJob implements ShouldQueue, ShouldBeUnique
 
     public function handle(SyncEngine $syncEngine): void
     {
+        Log::withContext(['server_id' => $this->serverId, 'job' => static::class]);
+
         $server = NpsServer::find($this->serverId);
         if (! $server || ! $server->isActive()) {
             return;

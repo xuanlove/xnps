@@ -1,0 +1,23 @@
+[Unit]
+Description=xnps-admin queue worker (%i)
+Documentation=https://github.com/xuanlove/xnps
+After=network-online.target mysql.service redis.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/var/www/xnps-admin
+# 实例：nps-sync / nps-provision / nps-upgrade（可再加 default）
+ExecStart=/usr/bin/php artisan queue:work --queue=%i --sleep=1 --tries=1 --timeout=900 --max-time=3600
+Restart=always
+RestartSec=5
+# 队列超时与 retry_after 必须匹配（DB_QUEUE_RETRY_AFTER/REDIS_QUEUE_RETRY_AFTER >= timeout）
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ReadWritePaths=/var/www/xnps-admin/storage /var/www/xnps-admin/bootstrap/cache
+
+[Install]
+WantedBy=multi-user.target

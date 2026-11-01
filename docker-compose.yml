@@ -1,0 +1,149 @@
+# xnps 单机开发栈（I3）：MySQL + xnps + nps-admin（web/queue/scheduler）
+#
+# 用法：
+#   docker compose up -d --build
+#   docker compose logs -f admin
+#   管理控制台 http://localhost:8000/admin （默认 admin@example.com / admin12345）
+#   Prometheus 指标 http://localhost:8000/metrics
+#
+# 默认口令仅用于本地开发，部署到生产前必须覆盖 APP_KEY/数据库口令/ADMIN_PASSWORD/NPS_AUTH_KEY。
+
+name: xnps
+
+x-admin-image: &admin-image
+  build:
+    context: ./nps-admin
+  image: xnps/admin:0.4.0
+  restart: unless-stopped
+  volumes:
+    - admin-storage:/var/www/html/storage
+
+x-admin-env: &admin-env
+  APP_ENV: production
+  APP_DEBUG: "false"
+  APP_KEY: ${APP_KEY:-base64:BbND9ZAg8AZS5oxLNrYW4zEowNwFaYfL35SHUDDDCWU=}
+  APP_URL: ${APP_URL:-http://localhost:8000}
+  ASSET_URL: /
+  LOG_CHANNEL: json
+  LOG_LEVEL: info
+  DB_CONNECTION: mysql
+  DB_HOST: db
+  DB_PORT: "3306"
+  DB_DATABASE: ${DB_DATABASE:-xnps}
+  DB_USERNAME: ${DB_USERNAME:-xnps}
+  DB_PASSWORD: ${DB_PASSWORD:-xnps-dev-password}
+  CACHE_STORE: database
+  SESSION_DRIVER: database
+  QUEUE_CONNECTION: database
+  DB_QUEUE_RETRY_AFTER: "900"
+  NPS_REQUIRE_HTTPS: "false"
+  NPS_METRICS_TOKEN: ${NPS_METRICS_TOKEN:-}
+  NPS_ALERT_WEBHOOK_URL: ${NPS_ALERT_WEBHOOK_URL:-}
+  NPS_SLOW_QUERY_MS: ${NPS_SLOW_QUERY_MS:-500}
+
+services:
+  db:
+    image: mysql:8.0
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${DB_DATABASE:-xnps}
+      MYSQL_USER: ${DB_USERNAME:-xnps}
+      MYSQL_PASSWORD: ${DB_PASSWORD:-xnps-dev-password}
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:-root-dev-password}
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]
+    volumes:
+      - db-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  nps:
+    build:
+      context: .
+      dockerfile: Dockerfile.nps
+    image: xnps/server:0.3.0
+    restart: unless-stopped
+    environment:
+      NPS_AUTH_KEY: ${NPS_AUTH_KEY:-xnps-docker-dev-key}
+      NPS_WEB_PASSWORD: ${NPS_WEB_PASSWORD:-xnps-docker-admin}
+    ports:
+      - "8080:8080"
+      - "8024:8024"
+    volumes:
+      - nps-conf:/conf
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/auth/gettime || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
+  # 一次性初始化：迁移 + 管理员 + 纳管 compose 内 nps（可重复执行）
+  init:
+    <<: *admin-image
+    restart: "no"
+    environment:
+      <<: *admin-env
+      ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@example.com}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-admin12345}
+      NPS_AUTH_KEY: ${NPS_AUTH_KEY:-xnps-docker-dev-key}
+    depends_on:
+      db:
+        condition: service_healthy
+      nps:
+        condition: service_healthy
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        php artisan migrate --force
+        php artisan nps:admin "$${ADMIN_EMAIL}" --name=Admin --password="$${ADMIN_PASSWORD}"
+        i=0
+        until php artisan nps:register docker-nps http://nps:8080 "$${NPS_AUTH_KEY}"; do
+          i=$$((i+1)); [ "$$i" -ge 20 ] && exit 1; sleep 3
+        done
+
+  admin:
+    <<: *admin-image
+    environment:
+      <<: *admin-env
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      init:
+        condition: service_completed_successfully
+    command: ["php", "artisan", "serve", "--host=0.0.0.0", "--port=8000"]
+
+  queue:
+    <<: *admin-image
+    environment:
+      <<: *admin-env
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    command:
+      - php
+      - artisan
+      - queue:work
+      - --queue=nps-sync,nps-provision,nps-upgrade,default
+      - --sleep=1
+      - --tries=3
+      - --timeout=900
+
+  scheduler:
+    <<: *admin-image
+    environment:
+      <<: *admin-env
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    command: ["php", "artisan", "schedule:work"]
+
+volumes:
+  db-data:
+  admin-storage:
+  nps-conf:

@@ -10,6 +10,7 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Facades\Log;
 
 /**
  * 监控采集 Job（阶段 3）：每 30s 采一台服务器的 /ext/system 落库
@@ -34,6 +35,8 @@ class CollectMetricsJob implements ShouldQueue, ShouldBeUnique
 
     public function handle(MonitoringService $monitoring): void
     {
+        Log::withContext(['server_id' => $this->serverId, 'job' => static::class]);
+
         $server = NpsServer::find($this->serverId);
         if (! $server || ! $server->isActive()) {
             return;

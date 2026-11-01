@@ -41,6 +41,7 @@
 - **在线/流量通道** `/ext/online`、`/ext/flow`（16 分片轮转采集，O(T+H)/片）。
 - **运维闭环** `/ext/config`（白名单配置读写 + 原子写 + 备份）、`/ext/cert`（证书下发/指纹对账，激活唯一入口）、`/ext/restart`（202 + 延迟触发）、`/ext/upgrade`（inline/url 双模式，sha256 强校验，仅 HTTPS + 内网地址防护，rename 原子替换 + 本地双份备份）。
 - **集中管理端能力**：三层同步（L1 写后回读 / L2 10s 增量 / L3 6h 全量对账）、Saga 写补偿、端口池预占、审批流、月度配额计费、证书全生命周期、灰度滚动升级。
+- **可观测性与运维（I3）**：`/healthz`（DB/缓存/队列/storage）、`/metrics`（Prometheus：同步延迟、队列积压、API 错误率、计费耗时、升级状态、告警数）、告警去抖/静默/确认/自动恢复、webhook 指数退避重试、JSON 结构化日志 + `X-Request-Id`、慢查询日志、`/ext/system` 磁盘/fd/goroutine 峰值；附 Docker Compose、systemd 单元、备份恢复脚本与压测工具。
 
 ### 性能实测（10 万 client / 20 万 tunnel）
 
@@ -90,6 +91,21 @@ php artisan schedule:work                 # 秒级调度（10s/30s）；或 cron
 ```bash
 cd nps-admin && npm install && npm run build
 # 生产环境建议设 ASSET_URL=/（反向代理/多域名下避免跨域绝对资源 URL）
+```
+
+**一键开发栈（Docker Compose，含 xnps + admin + queue + scheduler + MySQL）**：
+
+```bash
+docker compose up -d --build
+# 控制台 http://localhost:8000/admin（admin@example.com / admin12345，仅开发默认值）
+# 指标 http://localhost:8000/metrics    健康检查 http://localhost:8000/healthz
+```
+
+**回归压测**（`/ext` 管理面，可与基线对比）：
+
+```bash
+go run ./scripts/loadtest -url http://127.0.0.1:8080 -key <auth_key> -duration 60s -concurrency 64 -out baseline.json
+go run ./scripts/loadtest -url http://127.0.0.1:8080 -key <auth_key> -baseline baseline.json
 ```
 
 控制台功能：仪表盘、服务器（探活/同步/配置/证书）、客户端、隧道、域名解析、审批、计费与支付（套餐/钱包/账单/支付流水）、证书（上传/certd/内置 ACME/部署/HTTPS/轮换/对账）、版本升级（制品/灰度/回滚）、监控告警与指标曲线。

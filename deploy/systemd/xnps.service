@@ -1,0 +1,24 @@
+[Unit]
+Description=xnps server (nps 0.26.10 + nps-admin-ext)
+Documentation=https://github.com/xuanlove/xnps
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=xnps
+Group=xnps
+WorkingDirectory=/opt/xnps
+ExecStart=/opt/xnps/xnps
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=1048576
+# 安全加固（nps 仅需写 conf 与运行目录）
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/xnps
+
+[Install]
+WantedBy=multi-user.target
