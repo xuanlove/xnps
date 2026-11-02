@@ -1,220 +1,273 @@
-# nps 集中管理平台 · 项目交付总结
+# xnps 集中管理平台 · 项目交付总结
 
-> 交付日期：2026-10-28
-> 项目基线：nps 0.26.10（core 0.26.0）/ Laravel 12.70 / PHP 8.5 / Go 1.25
-> 交付范围：DESIGN.md（v3）定义的阶段 0–5 全部落地，含端到端验证与压测验收
+> 交付日期：2026-11-02  
+> 交付基线：`master` @ `75804d1`（I3）；I3.1 收口已完成、待合并  
+> 版本标识：**xnps 0.26.10-ext0.3.0** / **nps-admin 0.4.0**  
+> 上游基线：ehang-io/nps 0.26.10（GPL-3.0，修改记录见 [README.md](README.md)）
 
 ---
 
 ## 1. 项目概述
 
-**背景**：nps 是控制面/数据面分离的内网穿透系统（ehang.io/nps）。原版仅提供单机 Web 面板，无法满足多服务器集中管理、用户自助、计费运营的需求。
+xnps 是 ehang-io/nps 的 GPL-3.0 衍生分支：在保持原有内网穿透数据面的前提下，新增 `nps-admin-ext` 扩展模块与 Laravel 集中管理平面，解决原版单机面板在**多服务器纳管、用户自助、计费运营、证书生命周期、滚动升级、可观测性**上的空白。
 
-**目标**：构建 Laravel 集中管理平面，经 nps WebAPI 纳管 50–100 台 nps、平台总量 10 万级 client/tunnel，提供 P2 用户自助门户（审批流 + 计费）、证书全生命周期、HTTPS 全链路、版本滚动升级与监控告警。
+**交付目标**：
 
-**核心约束**（全程遵守）：
+- 纳管 50–100 台 nps，平台总量 10 万级 client / tunnel；
+- 全链路仅经 WebAPI 控制，不依赖 SSH/Ansible 带外通道；
+- 用户永不可见 nps `auth_key`；
+- 管理端可独立部署（Laravel 12 + MySQL），nps 侧保持轻量。
 
-| 约束 | 落实方式 |
-|---|---|
-| 不更改 nps 现有功能 | Go 侧纯新增 1338 行（nps-admin-ext 模块）+ 15 行观测 hook，零行为变更 |
-| 全部经 webapi 控制 | 无 SSH/Ansible 带外通道；配置/重启/升级均走 HTTP API |
-| 用户永不接触 nps auth_key | Sanctum token + Policy 归属校验，签名仅存在于服务端 SDK |
+**当前结论**：核心功能、管理控制台、支付、证书、升级、可观测性与运维工具均已交付，具备对外试运行条件；计费闭环（套餐变更/发票/退款/对账）与部分产品化能力列入 I4。
 
 ---
 
-## 2. 交付物总览
+## 2. 交付范围
 
-| 交付物 | 位置 | 规模 |
-|---|---|---|
-| 设计方案（v3 合并稿） | [DESIGN.md](DESIGN.md) | 30.9 KB / 16 章 |
-| nps 源码解析日记 | [PROJECT_DIARY.md](PROJECT_DIARY.md) | 55 KB / 17 章（含 17 项缺陷清单） |
-| **Go 侧扩展模块** | [lib/changelog](lib/changelog)、[server/ext](server/ext)、[web/controllers/ext.go](web/controllers/ext.go) | 13 文件 / 1338 行（含单元测试） |
-| **Laravel 管理平面** | [nps-admin/](nps-admin/) | 106 PHP 文件 / 8014 行（64 类 + 24 迁移） |
-| 源码备份 | nps-admin-src.tar.gz | 20.7 MB（不含 vendor） |
-| Git 提交 | `bafde1d` → `6d5fdd8`（阶段 0–4 各一 + 修复） | 每阶段独立 commit |
+### 2.1 xnps 内核（Go）
+
+- 规模：`server/ext`、`lib/changelog`、`lib/acmechallenge`、`web/controllers/ext.go` 共 **15 文件 / 2247 行**。
+- 端点：
+
+| 端点 | 能力 |
+|---|---|
+| `/ext/version` | 变更序号 + 内核/ext 版本，10s 增量探测 |
+| `/ext/changes` | 环形变更日志（1 万条，回绕 `truncated`） |
+| `/ext/online` | 在线 client id 集合 |
+| `/ext/flow` | 16 分片流量聚合，O(T+H)/片 |
+| `/ext/list` | 游标分页（client/tunnel/host），不做 Flow 聚合 |
+| `/ext/system` | CPU/内存/负载/连接数/磁盘/fd/goroutine 峰值 |
+| `/ext/config` | nps.conf 白名单读写、敏感键脱敏、备份 + 原子写 |
+| `/ext/cert` | 证书下发/指纹对账（激活唯一入口） |
+| `/ext/restart` | 202 + 延迟重启（Control 失败回退 execve） |
+| `/ext/upgrade` | inline/url 升级，sha256 + ELF/PE/Mach-O 架构校验，rename 原子替换 |
+| `/ext/acme/issue` | 内置 ACME HTTP-01 签发（仅 LE 生产/测试目录） |
+
+- 安全：签名鉴权 ±20s、强制 admin、升级仅 HTTPS 且默认拦截内网/回环地址、证书路径限制在 `conf/`。
+
+### 2.2 nps-admin 管理端（Laravel）
+
+- 规模：`app/` **89 PHP 文件 / 8016 行**，**30 个迁移**，**20 个测试文件**。
+- 核心能力：
+  - 三层同步：L1 写后回读 / L2 10s 版本增量 / L3 6h 全量对账；
+  - Saga 写补偿、端口池预占、`run_status` 回读校验；
+  - 审批状态机 + 自动审批规则 + 幂等开通（`operation_key`/`resource_id`）；
+  - 套餐/订阅/钱包/账单/流量基线/月度结算；
+  - 证书库（私钥 encrypted）、certd/native 双通道、内置 ACME、自动续期、HTTPS 防自锁编排、指纹对账；
+  - 制品库 + 灰度滚动升级 + 失败自动回滚；
+  - 告警生命周期（去抖/静默/确认/自动恢复/webhook 退避）；
+  - 审计日志（请求/响应脱敏）。
+- 计费口径：nps `flow_limit` 是生命周期累计值，管理端以月度基线 + 增量累加实现月度配额，支持 throttle/disable/bill 三种超额动作。
+
+### 2.3 管理控制台（Vue 3 + Vite + Tailwind）
+
+11 个页面：仪表盘、服务器、客户端、隧道、域名、审批、计费与支付、证书、升级、告警、登录。构建产物由 `ASSET_URL=/` 支持反向代理与多域名部署。
+
+### 2.4 支付
+
+- 支付宝当面付（RSA2 下单/回调验签）、微信支付 v3 Native（平台证书验签 + APIv3 Key AES-256-GCM）、mock 渠道；
+- 支付订单幂等入账、金额核对、回调验签、账单支付与钱包充值；
+- 真实商户号联调与退款/发票/对账报表待 I4。
+
+### 2.5 可观测性与运维
+
+- `/healthz`：DB/缓存/队列/storage 四项探针，200/503，不泄露异常详情；
+- `/metrics`：同步延迟、队列积压、API 错误率、计费耗时、升级状态、告警数（Prometheus 文本格式，支持 token）；
+- 结构化日志：生产默认 JSON、`X-Request-Id`、慢查询、同步链路 `server_id/job` 上下文；
+- 告警：可配置去抖窗口、静默、确认/解决、条件恢复自动 resolve、webhook 5 次指数退避；
+- 运维资产：Docker Compose（db/nps/init/admin/queue/scheduler）、systemd 单元、备份/恢复脚本、Grafana 面板、`/ext` 压测工具。
+
+### 2.6 工程与安全
+
+- CI：Go vet/test、govulncheck、PHPUnit（SQLite + MySQL 8）、Vue 构建、Docker/Compose 校验；
+- 发布：`build-xnps.sh` 14 平台 × server/client，sha256 + `nps-admin` 源码包；
+- 供应链：Go 1.26、`govulncheck` 调用路径 0 漏洞、`composer audit` 无公告、CycloneDX SBOM；
+- 安全加固：SSRF、HTTPS 强制、证书路径限制、制品 token 过期/轮换、abilities 隔离、限流、密码策略、审计脱敏。
 
 ---
 
 ## 3. 系统架构
 
 ```
-┌────────────────────────────────────────────────────────────┐
-│                    Laravel 集中管理平面                       │
-│                                                            │
-│  P2 用户自助门户（Sanctum + Policy）                          │
-│    注册/登录 → 申请 → 审批状态机 → 幂等开通 → 计费/账单         │
-│  管理端（is_admin）：纳管/审批/套餐/充值/证书/升级/监控          │
-│                                                            │
-│  NpsApiClient（md5 签名 + 时钟校准 + 响应统一 + 审计）          │
-│  SyncEngine 三层同步：L1 写后回读 / L2 版本增量(10s) /          │
-│                      L3 滚动对账(6h) + online(30s)/flow(5min) │
-│  ProvisioningService（Saga + 端口池 + run_status 校验）        │
-│  CertificateService / HttpsProvisioner（防自锁编排）           │
-│  UpgradeOrchestrator（预检 + canary + 自动回滚）               │
-│  MonitoringService（采集 + 6 类告警 + webhook）                │
-└──────────────┬─────────────────────────────────────────────┘
-               │ HTTPS（web_open_ssl）+ auth_key 签名（±20s）
-               ▼
-   ┌────────────────┐  ×50–100 台（单机 1–2 千 client）
-   │ nps + ext 模块  │  /ext/* 10 端点（O(1)/O(页)，替代 O(C×T) 原生 list）
-   └────────────────┘
+Laravel 管理平面
+  ├─ Sanctum + Policy（admin / portal 能力隔离）
+  ├─ NpsApiClient（md5 签名 + 时钟校准 + 重试 + 审计）
+  ├─ SyncEngine（L1/L2/L3 + online/flow）
+  ├─ ProvisioningService（Saga + 端口池）
+  ├─ BillingService（基线/配额/账单/钱包）
+  ├─ CertificateService / HttpsProvisioner
+  ├─ UpgradeOrchestrator（预检/canary/回滚）
+  ├─ AlertService（统一告警入口）
+  └─ /healthz + /metrics + JSON 日志
+        │ HTTPS + auth_key 签名
+        ▼
+  xnps（nps 0.26.10 + ext 0.3.0） × N 台
 ```
 
 ---
 
-## 4. 各阶段交付明细
+## 4. 迭代交付记录
 
-### 阶段 0：nps-admin-ext 扩展模块（Go，纯新增）
-
-**10 个扩展端点**（复用既有签名鉴权，强制 admin）：
-
-| 端点 | 用途 | 实测（10 万级） |
+| 迭代 | 提交 | 主要内容 |
 |---|---|---|
-| `/ext/version` | 变更计数 + 版本探测 | 0.1ms |
-| `/ext/changes` | 环形变更日志（1 万条，回绕 truncated） | 0.1ms |
-| `/ext/online` | 在线 client 集合 | 0.1ms |
-| `/ext/flow` | 流量聚合（16 分片） | 23ms |
-| `/ext/list` | 游标分页（不做 Flow 聚合） | 18–32ms |
-| `/ext/system` | 系统监控（不调 dealClientData） | — |
-| `/ext/config` | nps.conf 白名单读写（脱敏/备份/原子写） | — |
-| `/ext/cert` | 证书下发/指纹对账 | — |
-| `/ext/restart` | 202 + 延迟触发（Control 失败回退 execve） | — |
-| `/ext/upgrade` | 二进制升级（sha256 强校验 + rename 原子替换） | — |
-
-**侵入点**：15 行观测 hook（`lib/file/db.go` 9 处 + `index.go`/`client.go` 各 1 处 + 路由注册 2 行 + service 注入 2 行），语义零变更。
-
-**验证**：单元测试 4/4（含环形回绕）；真实进程冒烟 20 项全过（鉴权 302 拒绝、hook 链路、config 白名单/脱敏回写保护、restart 的 execve 回退与 change_seq 归零边界）。
-
-### 阶段 1：Laravel 核心
-
-- **NpsApiClient**：md5(auth_key+timestamp) 签名、`/auth/gettime` 时钟校准、三种响应格式统一、指数退避重试、302 识别（禁用重定向）、写操作全审计（签名脱敏）；
-- **SyncEngine 三层同步**：L2 含版本回退检测（nps 重启 → 全量对账）、`task→tunnel` 类型规范化、批量 upsert + 外键修复 + 失配删除；
-- **ProvisioningService Saga**：端口池（唯一约束 + TTL）→ API → 回读 `run_status` 校验（对冲 nps 虚报）→ 失败补偿；
-- **验证**：纳管 + 首次对账导入、同步延迟 **601ms**（标准 <30s）、Saga 全链路（端口分配→创建→回读→绑定）、删除级联 + 端口释放。
-
-### 阶段 2：P2 自助门户
-
-- **审批状态机**：submitted → approved → provisioning → provisioned / rejected / expired / failed；自动审批 3 规则（订阅/欠费/配额）+ 人工审批 + 过期扫描；
-- **幂等开通**（ProvisionApprovalJob 三层：status → payload.resource_id 回写 → 精确字段匹配）；
-- **计费引擎**：套餐/订阅/钱包/流水/账单；**月度配额执行层**（nps `flow_limit` 是生命周期累计值不可用作月度——Laravel 基线 + 增量累加，含 nps 重启清零防护；超额动作 throttle/disable/bill）；
-- **验证**：注册→自动审批→provisioned 全链路、人工驳回/批准、套餐参数映射（rate_limit=512）、越权 403、配额超额 throttle + 幂等、月度结算（月费 1000 + 超额 25 = 1025 分，钱包扣款、重复结算幂等）。
-
-### 阶段 3：证书子系统 + HTTPS + 监控
-
-- **双来源**（Manual 完整 + Acme/certd 生产对接骨架）+ **双通道**（Native 完整 + Certd 回退）+ 证书库（私钥 encrypted）；
-- **HttpsProvisioner 防自锁 5 步**：推证书（不重启）→ 写 `web_open_ssl` → 重启 → HTTPS 探活 → 切 `api_url`；失败落 critical 告警；
-- **指纹对账**（Laravel/Go 统一 PEM-sha256）+ 每日全平台对账 + 失配告警；
-- **监控**：`/ext/system` 30s 采集落库 + 6 类告警（CPU/内存/不可达/证书到期/同步延迟/隧道虚报）+ 1h 去抖 + 可选 webhook；
-- **验证**：HTTPS 编排 5 步全过、签名 API 走 TLS、指纹对账 ok、20 天到期证书触发告警、**轮换演练**（新证书部署 + 重启 + 核验，远端 not_after 更新）。
-
-### 阶段 4：版本滚动升级编排
-
-- **制品库**（版本/sha256/兼容矩阵/download_token + token 下载端点）——替代不可用的官方 `UpdateNps()`；
-- **编排器**：预检（core version 兼容矩阵——防旧 npc 全量断连 + 在线 npc 扫描 + conf 快照）→ canary（失败中止整批）→ 观察窗口 → 批次 → 汇总报告；
-- **单台流程**：url 模式升级（nps 出方向拉取 + sha256 强校验 + rename 原子替换）→ 联动重启 → 版本签名核对（`{version}-ext{ext_version}`）→ **失败自动回滚**（回推旧制品 + critical 告警）；
-- **验证**：双版本真实升级（0.26.10 → ext0.1.1）succeeded、**回滚演练**（回推 ext0.1.0）succeeded、canary 失败中止 + 告警、conf 快照 3 份存档。
-
-### 阶段 5：压测验收（10 万 client + 20 万 tunnel 数据面满载）
-
-| 指标 | 实测 | 标准/对照 |
-|---|---|---|
-| nps 启动加载（110MB JSON） | 4.2s | — |
-| nps 常驻内存 | 766MB（30 万条对象图） | 单机 1–2 千 client 规划下 <10MB 级 |
-| ext 端点（全部） | 0.1–32ms | — |
-| **原生 /client/list** | **>60s 超时** | **O(C×T)=200 亿遍历——设计论点实证** |
-| 同步延迟（直改→镜像） | **64ms** | <30s ✓ |
-| L3 全量对账（30 万行） | 7m32s | 6h 周期 ✓（生产多台并行同为 7.5 分钟） |
-| online 通道（10 万行 diff） | 7.2s | 30s 周期 ✓ |
-| flow 通道（6250 行/片） | 25.5s | 5min 周期 ✓（SQLite 放大，见优化建议） |
+| I0 | `2d3522b` | 移除 Job 自循环/种子，改 `schedule:work` 节拍 + `ShouldBeUnique`；写操作只重试幂等端点 |
+| I1 | `7d915ed` | 证书自动续期、升级流式下载/架构校验、流量与在线批量、端口池候选、对账空集清理、审批 CAS |
+| I2 | `6cc9c57` | SSRF/HTTPS/证书路径/token 过期/流式下载、abilities/限流/密码策略、审计脱敏、Go 1.26 + x/net/xz 升级、SBOM |
+| I3 | `75804d1` | `/healthz`、`/metrics`、`/ext/system` 磁盘/fd/峰值、告警生命周期、JSON 日志、Compose/systemd/备份/Grafana、CI 重建、压测工具 |
+| I3.1 | agent 分支 `e4cdc69`（待合并） | 告警统一 `AlertService`；升级 Run skipped 统计、canary 观察复检、回滚制品口径；CI 增加 Vue/MySQL/Docker；真实 nps 宕机告警/恢复演练 |
 
 ---
 
-## 5. 生产部署要点
+## 5. 质量与验证
 
-**环境**：PHP 8.2+ / MySQL 8 / Redis（可选）/ queue:work ×2（`nps-sync`、`nps-provision`）+ scheduler；nps 侧部署含 ext 模块的自建构建二进制。
+### 5.1 自动化测试与扫描
 
-**部署顺序**：
-
-```
-1. 部署 nps（自建二进制，含 nps-admin-ext）
-2. nps.conf 配置 auth_key（强随机）+ webapi 端口防火墙白名单（仅 Laravel 出口 IP）
-3. Laravel：composer install + .env（MySQL/Redis）+ migrate + 建管理员与套餐
-4. php artisan nps:register <name> <api_url> <auth_key>   # 纳管 + 首次对账
-5. HTTPS：上传证书 → enable-https（防自锁编排自动切换 api_url）
-6. 常驻：queue:work --queue=nps-sync,nps-provision,nps-upgrade + schedule:run
-```
-
-**关键配置**（`config/nps.php`）：同步间隔/分片数、自动审批规则、`quota_action`、超额单价、告警阈值、ACME/certd 对接、webhook。
-
-**运维命令**：`nps:sync [--reconcile]`（手动同步/对账）、`nps:register`（纳管）、`/api/admin/upgrades/*`（升级编排）、`/api/admin/certificates/*`（证书）。
-
----
-
-## 6. 已知限制与风险
-
-| # | 项 | 说明 | 缓解 |
-|---|---|---|---|
-| 1 | 重连风暴未实测 | 10 万真实 npc 断连重连需分布式压测机 | 滚动重启逐台 + 批间在线率等待（编排器已实现） |
-| 2 | flow 通道 25.5s/片 | SQLite 逐行 UPDATE 放大 | 生产 MySQL 批量 upsert（CASE WHEN） |
-| 3 | md5 签名可重放 | nps 既有设计（±20s 无 nonce） | HTTPS + 防火墙白名单双层缓解 |
-| 4 | ACME/certd 为骨架 | 真实 DNS-01 需公网域名 + DNS API | 接口已留（`NPS_ACME_MODE=certd`），人工上传通道完整可用 |
-| 5 | nps 既有缺陷未修 | 17 项见 PROJECT_DIARY.md §15（虚报/级联/O(C×T) 等） | 管理平面已逐项对冲（回读校验/影响面报告/ext 端点） |
-| 6 | 沙箱快照清理 | `.env`/`vendor`（gitignore 项）会话间丢失 | 每阶段 git commit + tar 备份；部署脚本含重建步骤 |
-
----
-
-## 7. 后续优化建议
-
-1. flow 采集改批量 upsert（MySQL `INSERT ... ON DUPLICATE KEY` 多行）；
-2. 审批开通接入通知渠道（邮件/站内信，当前仅状态查询）；
-3. 升级编排接入 conf 迁移钩子（版本间 conf 键 diff，当前仅快照）；
-4. 监控历史曲线前端可视化（数据已落库 `server_metrics`）；
-5. 多 nps 服务器健康分片调度（当前每台独立 worker，可加全局并发上限）。
-
----
-
-## 8. 开发中发现并修复的关键缺陷（跨阶段）
-
-| 阶段 | 缺陷 | 修复 |
-|---|---|---|
-| 0 | kardianos 在 systemd 平台总能创建 service 对象，Control 失败静默 | restart 加 execve 回退（冒烟实测） |
-| 1 | changelog type 用 nps 内部名 `task`，Laravel 匹配 `tunnel` → match 崩溃误补偿 | SyncEngine 类型规范化 + default 兜底 |
-| 1 | reconcile 后游标未回写 → 增量重复拉取 | 对账完成即回写 |
-| 1 | deleteClient 在镜像隧道删除后才查端口绑定 → 端口残留 | 先收集绑定再调 API |
-| 2 | 幂等判断 `(client, mode)` 太宽 → 新隧道申请误判已开通 | payload 回写 resource_id + 精确匹配 |
-| 2 | settleMonthly 把 Plan 当 subscription 取 `->plan` → plan_fee=0 | 类型修正 |
-| 4 | 下载 URL query 形式 vs 路由路径形式 → 404 | 统一路径形式 |
-| 4 | serve 启动早于 .env 重建 → APP_URL 错误 → Go 跟随重定向打到 nps 自身 | NpsApiClient 禁用重定向 + 启动顺序 |
-
----
-
-## 9. 提交记录
-
-```
-6d5fdd8 feat(stage-4): rolling upgrade orchestrator
-4dbd21f feat(stage-3): certificate subsystem + HTTPS + monitoring
-1b902e0 feat(stage-2): P2 self-service portal
-bafde1d fix(ext): restore verify_key in /ext/list
-（stage-0/1 含于 98919af..1b902e0 区间的 workspace 快照提交）
-```
-
-> 全部阶段均通过真实 nps 实例端到端验证；压测数据见 §4 阶段 5。
-
----
-
-## 10. I3.1 运维演练记录（2026-11-01）
-
-环境：沙箱内真实 xnps 0.26.10-ext0.3.0 + nps-admin（SQLite、`schedule:work` 手动触发）。
-
-| 步骤 | 结果 |
+| 项 | 结果 |
 |---|---|
-| `nps:register drill-nps http://127.0.0.1:38088 testkey` | 探活成功，首轮对账 1 client / 0 tunnel / 0 host |
-| 停止 nps 后 `nps:sync` | `is_reachable=0` |
-| `MonitoringService::checkAll()` | `new_alerts=1`，`unreachable/critical` 告警 `open` |
-| 重启 nps 后 `nps:sync` | `is_reachable=1`，`no changes` |
-| 再次 `checkAll()` | `new_alerts=0`，原告警 `resolved`（自动恢复） |
-| `GET /healthz` | 200，`status=ok`，响应头含 `X-Request-Id` |
-| `GET /metrics` | 输出 `nps_server_up`、`nps_sync_lag_seconds`、`nps_queue_jobs` 等序列 |
+| PHPUnit | **44 项 / 156 断言通过**（本地 PHP 8.5；CI 配置覆盖 SQLite 与 MySQL 8） |
+| Go | **21 个测试函数**通过（server/ext、lib/acmechallenge、lib/changelog） |
+| `go vet` | 扩展包通过 |
+| `govulncheck` | 调用路径 **0 漏洞**；仅 x/crypto 1 项无修复公告且不可达 |
+| `composer audit` | 无安全公告（含 CVE-2026-45070 修复） |
+| SBOM | `sbom/xnps.cdx.json`，169 个组件（Go 53 / PHP 78 / npm 25） |
+| 配置校验 | `config:cache`、route:list、Compose/Workflow/Grafana JSON 均通过 |
 
-说明：沙箱无 Docker，`docker compose up` 与 Grafana 实际抓取未执行；Compose/镜像构建已纳入 CI `docker` job 做静态与构建校验。
+### 5.2 运维演练（2026-11-01）
 
+真实 xnps 实例 + nps-admin：
+
+1. 停止 nps → `is_reachable=0`；
+2. `checkAll()` 产生 `unreachable/critical` 告警（open）；
+3. 重启 nps → `is_reachable=1`；
+4. 再次 `checkAll()` → 告警自动 `resolved`；
+5. `/healthz` 200 且带 `X-Request-Id`；`/metrics` 输出服务器/同步/队列序列。
+
+### 5.3 压测与性能基线
+
+管理面回归（`scripts/loadtest`，本地真实 nps）：
+
+| 指标 | 结果 |
+|---|---|
+| 请求数 | 31,262（6s / 8 并发） |
+| 错误 | 0 |
+| RPS | 5,210 |
+| P50 / P95 / P99 | 0.58 / 5.56 / 9.11 ms |
+
+历史 10 万 client / 20 万 tunnel 数据面基线（继承阶段 5 验收）：
+
+| 指标 | 实测 |
+|---|---|
+| ext 端点延迟 | 0.1–32 ms |
+| 原版 `/client/list` | >60s 超时（O(C×T) 设计论点实证） |
+| L2 同步延迟 | 64 ms |
+| L3 全量对账（30 万行） | 7m32s（6h 周期内） |
+| online 10 万行 diff | 7.2s（30s 周期内） |
+
+> 数据面重连风暴、100% 真实 npc 规模压测仍需独立压测机；当前结论用于容量规划与回归对比。
+
+---
+
+## 6. 部署与运维
+
+### 6.1 源码部署
+
+```bash
+cd nps-admin
+composer install --no-dev --optimize-autoloader
+cp .env.example .env && php artisan key:generate
+php artisan migrate --force
+php artisan nps:admin admin@example.com
+php artisan nps:register <name> http://<nps>:<web端口> <auth_key>
+# 常驻：queue:work --queue=nps-sync,nps-provision,nps-upgrade + schedule:work
+```
+
+前端：`npm ci && npm run build`；生产设置 `ASSET_URL=/`。
+
+### 6.2 Docker Compose（开发/演示）
+
+```bash
+docker compose up -d --build
+# admin: http://localhost:8000/admin
+# health: /healthz   metrics: /metrics
+```
+
+默认账号/口令仅用于开发（`admin@example.com / admin12345`、`NPS_AUTH_KEY=xnps-docker-dev-key`），生产必须覆盖。
+
+### 6.3 systemd / 备份
+
+- `deploy/systemd/`：xnps、scheduler、queue 模板；
+- `deploy/backup.sh`：DB + `storage/app` + 可选 nps conf/.env，带保留期与 sha256；
+- `deploy/restore.sh`：校验和、数据库与制品库恢复；
+- 完整生产说明见 [ADMIN_DEPLOYMENT.md](ADMIN_DEPLOYMENT.md)。
+
+### 6.4 发布物
+
+GitHub Release `v0.26.10-ext0.3.0`：
+
+- 30 个资产，145.9 MB；
+- 14 平台 × server/client 包 + `nps-admin` 源码包 + `sha256sums.txt`；
+- 发布流水线已改为复用 CI 门禁 + `build-xnps.sh` 全平台构建。
+
+---
+
+## 7. 交付物清单
+
+| 交付物 | 位置 |
+|---|---|
+| 方案与迭代计划 | [DESIGN.md](DESIGN.md)、[ITERATION_PLAN.md](ITERATION_PLAN.md) |
+| 审计报告与修复记录 | [AUDIT_REPORT.md](AUDIT_REPORT.md) |
+| 生产部署文档 | [ADMIN_DEPLOYMENT.md](ADMIN_DEPLOYMENT.md) |
+| 项目 README（含修改记录/致谢） | [README.md](README.md) |
+| 源码 | `cmd/`、`server/`、`web/`、`nps-admin/` |
+| 运维资产 | `docker-compose.yml`、`deploy/` |
+| 压测工具 | `scripts/loadtest/` |
+| SBOM | `sbom/xnps.cdx.json` |
+| 发布包 | GitHub Release `v0.26.10-ext0.3.0` |
+
+---
+
+## 8. 已知限制与风险
+
+| # | 项 | 说明 | 缓解/计划 |
+|---|---|---|---|
+| 1 | I3.1 待合并 | 代码在 `trae/agent-p7zySo`，master 尚未包含 | 合并后重新跑 CI 并推送 |
+| 2 | Compose/Grafana 未实跑 | 沙箱无 Docker；CI 已加 docker job 做构建校验 | 上线前在目标环境执行 compose smoke |
+| 3 | 真实支付未联调 | 支付宝/微信驱动与验签已单测，mock 全链路通过 | 上线前用沙箱商户号完成回调联调 |
+| 4 | 退款/发票/对账报表缺失 | 仅充值/账单支付 | I4-A 计费闭环 |
+| 5 | 配额惩罚不可恢复 | throttle/disable 后新账期未恢复 | I4-A 配额生命周期 |
+| 6 | certd/builtin 未做真实 DNS-01/续期演练 | 内置 ACME 需公网 80 端口；certd 依赖外部流水线 | I4-B 证书演练 |
+| 7 | 证书部署历史被覆盖 | 每 server 仅一条 deployment | I4-B append-only + 回滚 |
+| 8 | 无多服务器调度/HA | 默认第一台 active 服务器 | I4-C 容量/健康选址 |
+| 9 | 注册开放、无邮箱验证 | 可批量注册 | I4-C 验证码/邮箱验证 |
+| 10 | `/ext/list` 每页全量排序 | 10 万 client 对账为 O(N log N)/页 | I4-B 游标优化 |
+| 11 | md5 签名可重放 | nps 既有设计（±20s 无 nonce） | HTTPS + 防火墙白名单 |
+
+---
+
+## 9. 后续迭代建议（I4）
+
+- **I4-A 计费与套餐闭环**：订阅分配/升降级折算、配额恢复、发票、退款、渠道对账、欠费宽限与催缴。
+- **I4-B 证书与升级可靠性**：部署历史/回滚、certd 异步状态机、真实 ACME 演练、升级观察复检与制品口径统一。
+- **I4-C 产品化与工程化**：告警 UI 操作、订阅/发票 UI、门户验证、多服务器调度、OpenAPI/i18n、Seeder、CI 全链路。
+
+详见 [ITERATION_PLAN.md](ITERATION_PLAN.md)。
+
+---
+
+## 10. 验收结论
+
+- 功能：内核扩展、管理端、UI、支付（mock/验签）、证书、升级、监控告警、健康检查与指标均可用。
+- 质量：PHP/Go 测试、安全扫描、SBOM、CI 门禁已建立；真实 nps 宕机告警/恢复演练通过。
+- 运维：生产部署文档、Compose、systemd、备份恢复、Grafana、压测工具齐备。
+- 发布：GitHub Release 资产完整（30 个，145.9 MB，含 sha256）。
+- 遗留：I3.1 合并、真实支付/ACME 联调、计费闭环与产品化 UI，列为 I4。
+
+**结论：达到对外试运行标准；生产上线前需完成 I3.1 合并与 I4-A 计费闭环。**
+
+---
+
+## 附录：版本、提交与致谢
+
+- 内核版本：`0.26.10`；扩展版本：`ext 0.3.0`；管理端标识：`nps-admin 0.4.0`。
+- 关键提交：I0 `2d3522b`、I1 `7d915ed`、I2 `6cc9c57`、I3 `75804d1`；I3.1 待合并。
+- 上游项目：ehang-io/nps（GPL-3.0）。本项目保留原许可证与版权声明，修改记录完整披露于 README；向原作者与社区致谢。
